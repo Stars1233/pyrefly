@@ -551,7 +551,6 @@
   "typeddicts_class_syntax.py": [
     "Line 33: Expected 1 errors",
     "Line 38: Expected 1 errors",
-    "Line 49: Expected 1 errors",
     "Line 34: Unexpected errors ['TypedDict item `method2` may not be initialized']",
     "Line 39: Unexpected errors ['TypedDict item `method3` may not be initialized']"
   ],

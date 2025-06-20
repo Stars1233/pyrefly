@@ -589,6 +589,10 @@ impl Answers {
         self.solver.for_display(t)
     }
 
+    pub fn solver(&self) -> &Solver {
+        &self.solver
+    }
+
     pub fn get_type_trace(&self, range: TextRange) -> Option<Arc<Type>> {
         let lock = self.trace.as_ref()?.lock();
         lock.types.get(&range).duped()

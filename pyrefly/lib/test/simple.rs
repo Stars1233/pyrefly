@@ -1479,3 +1479,18 @@ def func() -> int:
     return 1
 "#,
 );
+
+testcase!(
+    test_nested_self_init,
+    r#"
+# From https://github.com/facebook/pyrefly/issues/444, this used to error
+class MyException:
+    def __init__(self) -> None:
+        self.x = ""
+        self
+
+
+def f(x: MyException):
+    x.__init__()
+"#,
+);

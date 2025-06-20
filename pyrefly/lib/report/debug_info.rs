@@ -5,12 +5,12 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::any::type_name_of_val;
 use std::sync::Arc;
 
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::display::DisplayWithCtx;
 use pyrefly_util::prelude::SliceExt;
+use pyrefly_util::visit::VisitMut;
 use serde::Deserialize;
 use serde::Serialize;
 use starlark_map::small_map::SmallMap;
@@ -54,6 +54,14 @@ pub fn debug_info(transaction: &Transaction, handles: &[Handle], is_javascript: 
     let debug_info =
         DebugInfo::new(&owned.map(|x| (&*x.0, &x.1.module_info, &x.1.errors, &x.2, &*x.3)));
     let mut output = serde_json::to_string(&debug_info).unwrap();
+
+    // It's super handy to be able to diff the output, which we can do most easily if each binding is on its own line.
+    // Doing that with Serde isn't possible (you can make it pretty, or you can make it compact, but not pretty on weird metrics),
+    // therefore we mangle the code after with string manipulation.
+    output = output
+        .replace("{\"key\":", "\n{\"key\":")
+        .replace("],\"errors\":", "\n],\"errors\":");
+
     if is_javascript {
         output = format!("var data = {output}");
     }
@@ -73,7 +81,6 @@ struct Module {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Binding {
-    kind: String,
     key: String,
     location: String,
     binding: String,
@@ -100,6 +107,7 @@ impl DebugInfo {
             t: &AnswerEntry<K>,
             module_info: &ModuleInfo,
             bindings: &Bindings,
+            answers: &Answers,
             res: &mut Vec<Binding>,
         ) where
             BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
@@ -108,13 +116,18 @@ impl DebugInfo {
             for (idx, val) in t.iter() {
                 let key = bindings.idx_to_key(idx);
                 res.push(Binding {
-                    kind: type_name_of_val(key).rsplit_once(':').unwrap().1.to_owned(),
                     key: module_info.display(key).to_string(),
                     location: module_info.source_range(key.range()).to_string(),
                     binding: bindings.get(idx).display_with(bindings).to_string(),
                     result: match val.get() {
                         None => "None".to_owned(),
-                        Some(v) => v.to_string(),
+                        Some(v) => {
+                            let mut r = (*v).clone();
+                            r.visit_mut(&mut |t| {
+                                answers.solver().expand_mut(t);
+                            });
+                            r.to_string()
+                        }
                     },
                 })
             }
@@ -126,7 +139,13 @@ impl DebugInfo {
                 .map(|(config, module_info, errors, bindings, answers)| {
                     let mut res = Vec::new();
                     let error_config = config.get_error_config(module_info.path().as_path());
-                    table_for_each!(answers.table(), |t| f(t, module_info, bindings, &mut res));
+                    table_for_each!(answers.table(), |t| f(
+                        t,
+                        module_info,
+                        bindings,
+                        answers,
+                        &mut res
+                    ));
                     let errors = errors.collect(&error_config).shown.map(|e| Error {
                         location: e.source_range().to_string(),
                         message: e.msg().to_owned(),

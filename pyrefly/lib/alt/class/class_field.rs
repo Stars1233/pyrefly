@@ -123,7 +123,7 @@ impl Display for ClassField {
         match &self.0 {
             ClassFieldInner::Simple {
                 ty, initialization, ..
-            } => write!(f, "@{ty} ({initialization})"),
+            } => write!(f, "{ty} ({initialization})"),
         }
     }
 }
@@ -1006,7 +1006,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 )
             }
             ClassFieldInner::Simple {
-                ty,
+                mut ty,
                 readonly,
                 annotation,
                 ..
@@ -1014,6 +1014,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 let is_class_var = annotation.is_some_and(|ann| ann.is_class_var());
                 match field.initialization() {
                     ClassFieldInitialization::Class(_) => {
+                        self.expand_type_mut(&mut ty); // bind_instance matches on the type, so resolve it if we can
                         bind_instance_attribute(instance, ty, is_class_var, readonly)
                     }
                     ClassFieldInitialization::Instance(_) if readonly || is_class_var => {

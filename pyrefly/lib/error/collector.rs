@@ -6,6 +6,7 @@
  */
 
 use std::fmt::Debug;
+use std::mem;
 
 use dupe::Dupe;
 use pyrefly_util::lock::Mutex;
@@ -18,6 +19,7 @@ use crate::error::error::Error;
 use crate::error::kind::ErrorKind;
 use crate::error::style::ErrorStyle;
 use crate::module::module_info::ModuleInfo;
+use crate::module::module_info::SourceRange;
 
 #[derive(Debug, Default, Clone)]
 struct ModuleErrors {
@@ -45,7 +47,23 @@ impl ModuleErrors {
         // We want to sort only by source-range, not by message.
         // When we get an overload error, we want that overload to remain before whatever the precise overload failure is.
         self.items.sort_by_key(|x| x.source_range().clone());
-        self.items.dedup();
+
+        // Within a single source range we want to dedupe, even if the error messages aren't adjacent
+        let mut res = Vec::with_capacity(self.items.len());
+        mem::swap(&mut res, &mut self.items);
+
+        // The range and where that range started in self.items
+        let mut previous_range = SourceRange::default();
+        let mut previous_start = 0;
+        for x in res {
+            if x.source_range() != &previous_range {
+                previous_range = x.source_range().clone();
+                previous_start = self.items.len();
+                self.items.push(x);
+            } else if !self.items[previous_start..].contains(&x) {
+                self.items.push(x);
+            }
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -220,10 +238,7 @@ mod tests {
                 .collect(&ErrorConfig::new(&ErrorDisplayConfig::default(), false))
                 .shown
                 .map(|x| x.msg()),
-            // We do end up with two `b` with the same location.
-            // We could fix that by deduplicating within the same source location, but that
-            // requires more effort and is rare. So for now, let's just keep it simple.
-            vec!["b", "a", "b", "a"]
+            vec!["b", "a", "a"]
         );
     }
 

@@ -8,6 +8,14 @@ $ echo "" > $TMPDIR/empty.py && $PYREFLY check --python-version 3.13.0 $TMPDIR/e
 [0]
 ```
 
+## No errors on reveal_type
+
+```scrut {output_stream: stderr}
+$ echo -e "from typing import reveal_type\nreveal_type(1)" > $TMPDIR/empty.py && $PYREFLY check --python-version 3.13.0 $TMPDIR/empty.py -a
+ INFO errors shown: 0* (glob)
+[0]
+```
+
 ## No errors on our test script
 
 ```scrut {output_stream: stderr}

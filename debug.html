@@ -106,10 +106,9 @@ function render(keep) {
             binding = module_data.bindings[binding];
             if (keep(binding.location, binding.key + " " + binding.binding + " " + binding.result)) {
                 const item = document.createElement("li");
-                item.textContent = binding.location + " " + binding.kind + " " + binding.key + " = " + binding.binding + " = " + binding.result;
+                item.textContent = binding.location + " " + binding.key + " = " + binding.binding + " = " + binding.result;
                 $keys.appendChild(li([
                     ["location", binding.location, " "],
-                    ["kind", binding.kind, " "],
                     ["key", binding.key, " = "],
                     ["binding", binding.binding, " = "],
                     ["result", binding.result, ""],

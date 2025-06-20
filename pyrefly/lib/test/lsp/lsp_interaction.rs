@@ -427,6 +427,32 @@ fn test_completion() {
                     }
                 }),
             }),
+            Message::from(Notification {
+                method: "textDocument/didChange".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": {
+                        "uri": Url::from_file_path(root.path().join("foo.py")).unwrap().to_string(),
+                        "languageId": "python",
+                        "version": 2
+                    },
+                    "contentChanges": [{
+                        "text": format!("{}\n{}", std::fs::read_to_string(root.path().join("foo.py")).unwrap(), "Sequenc")
+                    }],
+                }),
+            }),
+            Message::from(Request {
+                id: RequestId::from(4),
+                method: "textDocument/completion".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": {
+                        "uri": Url::from_file_path(root.path().join("foo.py")).unwrap().to_string()
+                    },
+                    "position": {
+                        "line": 11,
+                        "character": 7
+                    }
+                }),
+            }),
         ],
         expected_messages_from_language_server: vec![
             Message::Response(Response {
@@ -441,6 +467,36 @@ fn test_completion() {
                 result: Some(
                     serde_json::json!({"isIncomplete":false,"items":[{"detail":"type[Bar]","kind":6,"label":"Bar","sortText":"0"}]}),
                 ),
+                error: None,
+            }),
+            Message::Response(Response {
+                id: RequestId::from(4),
+                result: Some(serde_json::json!({
+                    "isIncomplete":false,
+                    "items":[
+                        {"detail":"type[Bar]","kind":6,"label":"Bar","sortText":"0"},
+                        {
+                            "additionalTextEdits":[{
+                                "newText":"from typing import Sequence\n",
+                                "range":{"end":{"character":0,"line":5},"start":{"character":0,"line":5}}
+                            }],
+                            "detail":"from typing import Sequence\n",
+                            "kind":7,
+                            "label":"Sequence",
+                            "sortText":"0"
+                        },
+                        {
+                            "additionalTextEdits":[{
+                                "newText":"from typing import MutableSequence\n",
+                                "range":{"end":{"character":0,"line":5},"start":{"character":0,"line":5}}
+                            }],
+                            "detail":"from typing import MutableSequence\n",
+                            "kind":7,
+                            "label":"MutableSequence",
+                            "sortText":"0"
+                        }
+                    ]
+                })),
                 error: None,
             }),
         ],

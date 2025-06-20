@@ -21,13 +21,13 @@ use crate::state::load::Load;
 /// The errors from a collection of modules.
 #[derive(Debug)]
 pub struct Errors {
-    // Sorted by module name (so deterministic display order)
+    // Sorted by module name and path (so deterministic display order)
     loads: Vec<(Arc<Load>, ArcId<ConfigFile>)>,
 }
 
 impl Errors {
     pub fn new(mut loads: Vec<(Arc<Load>, ArcId<ConfigFile>)>) -> Self {
-        loads.sort_by_key(|x| x.0.module_info.name());
+        loads.sort_by_key(|x| (x.0.module_info.name(), x.0.module_info.path().dupe()));
         Self { loads }
     }
 

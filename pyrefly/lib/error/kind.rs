@@ -17,6 +17,7 @@ use serde::Serialize;
 use yansi::Paint;
 use yansi::Painted;
 
+// IMPORTANT: these cases should be listed in order of severity
 #[derive(Debug, Clone, Dupe, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub enum Severity {
     Info,
@@ -93,6 +94,9 @@ pub enum ErrorKind {
     /// Attempting to specialize a generic class with incorrect type arguments.
     /// e.g. `type[int, str]` is an error because `type` accepts only 1 type arg.
     BadSpecialization,
+    /// A TypedDict definition has some typing-related error.
+    /// e.g. using invalid keywords in the base class list.
+    BadTypedDict,
     /// An error caused by unpacking.
     /// e.g. attempting to unpack an iterable into the wrong number of variables.
     BadUnpacking,

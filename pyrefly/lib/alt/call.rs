@@ -207,6 +207,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             Type::Type(box Type::TypedDict(typed_dict)) => {
                 Some(CallTarget::new(Target::TypedDict(typed_dict)))
             }
+            // TODO: this is wrong, because we lose the information that this is a type variable
+            // TODO: handle type[T]
             Type::Quantified(q) if q.is_type_var() => match q.restriction() {
                 Restriction::Bound(bound) => self.as_call_target(bound.clone()),
                 // TODO: handle constraints

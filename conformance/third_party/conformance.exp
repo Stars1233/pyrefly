@@ -10016,6 +10016,16 @@
       "name": "invalid-inheritance",
       "stop_column": 20,
       "stop_line": 44
+    },
+    {
+      "code": -2,
+      "column": 7,
+      "concise_description": "TypedDict does not support keyword argument `other`",
+      "description": "TypedDict does not support keyword argument `other`",
+      "line": 49,
+      "name": "bad-typed-dict",
+      "stop_column": 20,
+      "stop_line": 49
     }
   ],
   "typeddicts_final.py": [],

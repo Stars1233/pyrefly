@@ -17,6 +17,7 @@ use lsp_types::ParameterLabel;
 use lsp_types::SemanticToken;
 use lsp_types::SignatureHelp;
 use lsp_types::SignatureInformation;
+use lsp_types::TextEdit;
 use pyrefly_util::gas::Gas;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::prelude::VecExt;
@@ -77,6 +78,7 @@ use crate::types::types::BoundMethodType;
 use crate::types::types::Type;
 
 const INITIAL_GAS: Gas = Gas::new(100);
+const MIN_CHARACTERS_TYPED_AUTOIMPORT: usize = 3;
 
 #[derive(Clone)]
 pub enum DefinitionMetadata {
@@ -1105,7 +1107,7 @@ impl<'a> Transaction<'a> {
                     let error_range = module_info.to_text_range(error.source_range());
                     if error_range.contains_range(range) {
                         let unknown_name = module_info.code_at(error_range);
-                        for handle_to_import_from in self.search_exports(unknown_name) {
+                        for handle_to_import_from in self.search_exports_exact(unknown_name) {
                             let (position, insert_text) =
                                 insert_import_edit(&ast, handle_to_import_from, unknown_name);
                             let range = TextRange::at(position, TextSize::new(0));
@@ -1379,10 +1381,10 @@ impl<'a> Transaction<'a> {
                         })
                 })
             }
-            Some(IdentifierWithContext { .. }) => {
+            Some(IdentifierWithContext { identifier, .. }) => {
                 let bindings = self.get_bindings(handle)?;
                 let module_info = self.get_module_info(handle)?;
-                let names = bindings
+                let mut names = bindings
                     .available_definitions(position)
                     .into_iter()
                     .filter_map(|idx| {
@@ -1405,6 +1407,36 @@ impl<'a> Transaction<'a> {
                         }
                     })
                     .collect::<Vec<_>>();
+                // We should not try to generate autoimport when the user has typed very few
+                // characters. It's unhelpful to narrow down suggestions.
+                if identifier.as_str().len() >= MIN_CHARACTERS_TYPED_AUTOIMPORT
+                    && let Some(ast) = self.get_ast(handle)
+                {
+                    for (handle_to_import_from, name, export) in
+                        self.search_exports_fuzzy(identifier.as_str())
+                    {
+                        let (position, insert_text) =
+                            insert_import_edit(&ast, handle_to_import_from, &name);
+                        let import_text_edit = TextEdit {
+                            range: source_range_to_range(
+                                &module_info
+                                    .source_range(TextRange::at(position, TextSize::new(0))),
+                            ),
+                            new_text: insert_text.clone(),
+                        };
+                        names.push(CompletionItem {
+                            label: name,
+                            detail: Some(insert_text),
+                            kind: export
+                                .symbol_kind
+                                .map_or(Some(CompletionItemKind::VARIABLE), |k| {
+                                    Some(k.to_lsp_completion_item_kind())
+                                }),
+                            additional_text_edits: Some(vec![import_text_edit]),
+                            ..Default::default()
+                        });
+                    }
+                }
                 Some(names)
             }
             None => None,

@@ -2809,7 +2809,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         x.range,
                         ErrorKind::InvalidYield,
                         None,
-                        format!("yield from value must be iterable, got `{ty}`"),
+                        format!(
+                            "yield from value must be iterable, got `{}`",
+                            self.for_display(ty)
+                        ),
                     );
                     YieldFromResult::any_error()
                 };

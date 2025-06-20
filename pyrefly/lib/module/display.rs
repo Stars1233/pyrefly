@@ -15,6 +15,7 @@ use ruff_python_ast::ExprCall;
 use ruff_python_ast::ExprYield;
 use ruff_python_ast::ExprYieldFrom;
 use ruff_python_ast::Stmt;
+use ruff_python_ast::StmtAugAssign;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -54,6 +55,12 @@ impl DisplayWith<ModuleInfo> for ExprYieldFrom {
 }
 
 impl DisplayWith<ModuleInfo> for ExprCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, m: &ModuleInfo) -> fmt::Result {
+        write!(f, "{}", m.code_at(self.range()))
+    }
+}
+
+impl DisplayWith<ModuleInfo> for StmtAugAssign {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, m: &ModuleInfo) -> fmt::Result {
         write!(f, "{}", m.code_at(self.range()))
     }

@@ -29,6 +29,9 @@ use std::time::Instant;
 
 use dupe::Dupe;
 use enum_iterator::Sequence;
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use itertools::Itertools;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::events::CategorizedEvents;
 use pyrefly_util::lock::Mutex;
@@ -78,6 +81,7 @@ use crate::config::finder::ConfigFinder;
 use crate::error::collector::ErrorCollector;
 use crate::error::kind::ErrorKind;
 use crate::export::definitions::DocString;
+use crate::export::exports::Export;
 use crate::export::exports::ExportLocation;
 use crate::export::exports::Exports;
 use crate::export::exports::LookupExport;
@@ -354,42 +358,105 @@ impl<'a> Transaction<'a> {
         Errors::new(res)
     }
 
-    pub fn search_exports(&self, name: &str) -> Vec<Handle> {
-        let mut handles = Vec::new();
-        for (handle, module_data) in self.data.updated_modules.iter_unordered() {
-            if let Some(export) = self
-                .lookup_export(module_data)
-                .exports(&self.lookup(module_data.dupe()))
-                .get(&Name::new(name))
-            {
+    pub fn search_exports_exact(&self, name: &str) -> Vec<Handle> {
+        self.search_exports_helper(|handle, exports| {
+            if let Some(export) = exports.get(&Name::new(name)) {
                 match export {
-                    ExportLocation::ThisModule(_) => handles.push(handle.dupe()),
+                    ExportLocation::ThisModule(_) => vec![handle.dupe()],
                     // Re-exported modules like `foo` in `from from_module import foo`
                     // should likely be ignored in autoimport suggestions
                     // because the original export in from_module will show it.
                     // The current strategy will prevent intended re-exports from showing up in
                     // result list, but it's better than showing thousands of likely bad results.
-                    ExportLocation::OtherModule(_) => {}
+                    ExportLocation::OtherModule(_) => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            }
+        })
+    }
+
+    pub fn search_exports_fuzzy(&self, pattern: &str) -> Vec<(Handle, String, Export)> {
+        self.search_exports_helper(|handle, exports| {
+            let matcher = SkimMatcherV2::default().smart_case();
+            let mut results = Vec::new();
+            for (name, location) in exports.iter() {
+                let name = name.as_str();
+                if let Some(score) = matcher.fuzzy_match(name, pattern) {
+                    match location {
+                        ExportLocation::OtherModule(_) => {}
+                        ExportLocation::ThisModule(export) => {
+                            results.push((score, handle.dupe(), name.to_owned(), export.clone()));
+                        }
+                    }
                 }
             }
-        }
-        for (handle, module_data) in self.readable.modules.iter() {
-            if self.data.updated_modules.get(handle).is_some() {
-                continue;
+            results
+        })
+        .into_iter()
+        .sorted_by_key(|(score, _, _, _)| *score)
+        .rev()
+        .map(|(_, handle, name, export)| (handle, name, export))
+        .collect()
+    }
+
+    fn search_exports_helper<V: Send + Sync>(
+        &self,
+        searcher: impl Fn(&Handle, Arc<SmallMap<Name, ExportLocation>>) -> Vec<V> + Sync,
+    ) -> Vec<V> {
+        let all_results = Mutex::new(Vec::new());
+        {
+            let tasks = TaskHeap::new();
+            // It's very fast to find whether a module contains an export, but the cost will
+            // add up for a large codebase. Therefore, we will parallelize the work. The work is
+            // distributed in the task heap above.
+            // To avoid too much lock contention, we chunk the work into size of 1000 modules.
+            for chunk in &self.data.updated_modules.iter_unordered().chunks(1000) {
+                tasks.push((), chunk.collect_vec(), false);
             }
-            let module_data = ArcId::new(module_data.clone_for_mutation());
-            if let Some(export) = self
-                .lookup_export(&module_data)
-                .exports(&self.lookup(module_data))
-                .get(&Name::new(name))
+            self.data.state.threads.spawn_many(|| {
+                tasks.work_without_cancellation(|_, modules| {
+                    let mut thread_local_results = Vec::new();
+                    for (handle, module_data) in modules {
+                        let exports = self
+                            .lookup_export(module_data)
+                            .exports(&self.lookup(module_data.dupe()));
+                        thread_local_results.extend(searcher(handle, exports));
+                    }
+                    if !thread_local_results.is_empty() {
+                        all_results.lock().push(thread_local_results);
+                    }
+                });
+            });
+        }
+        {
+            let tasks = TaskHeap::new();
+            for chunk in &self
+                .readable
+                .modules
+                .iter()
+                .filter(|(handle, _)| self.data.updated_modules.get(handle).is_none())
+                .chunks(1000)
             {
-                match export {
-                    ExportLocation::ThisModule(_) => handles.push(handle.dupe()),
-                    ExportLocation::OtherModule(_) => {}
-                }
+                tasks.push((), chunk.collect_vec(), false);
             }
+            self.data.state.threads.spawn_many(|| {
+                tasks.work_without_cancellation(|_, modules| {
+                    let mut thread_local_results = Vec::new();
+                    for (handle, module_data) in modules {
+                        let module_data = ArcId::new(module_data.clone_for_mutation());
+                        let exports = self
+                            .lookup_export(&module_data)
+                            .exports(&self.lookup(module_data));
+                        thread_local_results.extend(searcher(handle, exports));
+                    }
+                    if !thread_local_results.is_empty() {
+                        all_results.lock().push(thread_local_results);
+                    }
+                });
+            });
         }
-        handles
+        all_results.into_inner().into_iter().flatten().collect()
     }
 
     pub fn get_config_errors(&self) -> Vec<ConfigError> {

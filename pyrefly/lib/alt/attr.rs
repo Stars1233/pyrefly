@@ -1509,7 +1509,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 Some(AttributeBase::ClassObject(class.class_object().dupe()))
             }
             Type::Type(box Type::Quantified(q)) if q.is_type_var() => match q.restriction() {
-                // TODO(#119): this is wrong, because we lose the information that this is a type var
+                // TODO(https://github.com/facebook/pyrefly/issues/514)
+                // this is wrong, because we lose the information that this is a type var
                 Restriction::Bound(bound) => {
                     self.as_attribute_base_no_union(Type::type_form(bound.clone()))
                 }
@@ -1568,15 +1569,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 }
             }
             Type::SuperInstance(box (cls, obj)) => Some(AttributeBase::SuperInstance(cls, obj)),
-            Type::Quantified(q) if q.is_type_var() => match q.restriction() {
-                // TODO(#119): this is wrong, because we lose the information that this is a type var
-                Restriction::Bound(bound) => self.as_attribute_base_no_union(bound.clone()),
-                // TODO: handle constraints
-                Restriction::Constraints(_) => None,
-                Restriction::Unrestricted => {
-                    Some(AttributeBase::ClassInstance(self.stdlib.object().clone()))
-                }
-            },
             // TODO: check to see which ones should have class representations
             Type::Union(_)
             | Type::SpecialForm(_)
