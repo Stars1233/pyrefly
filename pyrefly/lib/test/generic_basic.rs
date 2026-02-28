@@ -664,3 +664,23 @@ list[int].__add__
 list[int] == list[str]
 "#,
 );
+
+// Regression test for https://github.com/facebook/pyrefly/issues/1137
+testcase!(
+    test_unresolved_typevar_in_union_resolves_to_never,
+    r#"
+from __future__ import annotations
+from typing import assert_type
+
+class A[T]:
+    def __init__(self, value: T) -> None:
+        self.t: T = value
+    def f[Expected](self) -> A[Expected | T]:
+        ...
+
+_: A[object] = A(1).f()
+
+b = A(1).f()
+assert_type(b, A[int])
+"#,
+);
