@@ -883,3 +883,25 @@ def foo(cond: bool):
     assert_type(x, int | None)
     "#,
 );
+
+// Regression test for https://github.com/facebook/pyrefly/issues/714
+testcase!(
+    test_loop_variable_type_with_cross_branch_reassignment,
+    r#"
+lineStart: int | None = None
+lineno: int = 0
+
+def needsInt(i: int) -> None:
+    ...
+
+for part in ['a', 'b', 'c', 'd']:
+    if part == 'a':
+        ...
+    elif part == 'b':
+        lineno = lineStart if lineStart is not None else 0
+    elif part == 'c':
+        needsInt(lineno)
+    elif part == 'd':
+        lineStart = lineno
+"#,
+);
