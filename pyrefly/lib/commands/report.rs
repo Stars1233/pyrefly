@@ -114,6 +114,29 @@ struct FileReport {
     functions: Vec<Function>,
     classes: Vec<ReportClass>,
     suppressions: Vec<Suppression>,
+    /// Percentage of functions that are fully annotated (0.0 to 100.0).
+    /// A function is fully annotated if it has return and parameter annotations present.
+    annotation_completeness: f64,
+}
+
+/// Summary statistics for the entire report.
+#[derive(Debug, Serialize)]
+struct ReportSummary {
+    /// Total number of files analyzed.
+    total_files: usize,
+    /// Total number of functions across all files.
+    total_functions: usize,
+    /// Number of functions that are fully annotated (have annotation text).
+    fully_annotated_functions: usize,
+    /// Aggregate annotation completeness score across all files (0.0 to 100.0).
+    aggregate_annotation_completeness: f64,
+}
+
+/// Full report including per-file reports and aggregate summary.
+#[derive(Debug, Serialize)]
+struct FullReport {
+    files: HashMap<String, FileReport>,
+    summary: ReportSummary,
 }
 
 /// Generate reports from pyrefly type checking results.
@@ -381,17 +404,18 @@ impl ReportArgs {
         functions
     }
 
-    /// Check if a function is completely annotated (has return annotation and all params annotated except self/cls)
+    /// Check if a function is completely annotated (has return annotation and all params annotated).
+    /// Only the first parameter is allowed to be unannotated if it is named `self` or `cls`.
     fn is_function_completely_annotated(bindings: &Bindings, func_def: &FunctionDefData) -> bool {
         // Check return annotation
         let return_key = Key::ReturnType(ShortIdentifier::new(&func_def.name));
         let return_idx = bindings.key_to_idx(&return_key);
         let has_return_annotation = if let Binding::ReturnType(ret) = bindings.get(return_idx) {
-            match &ret.kind {
+            matches!(
+                &ret.kind,
                 ReturnTypeKind::ShouldValidateAnnotation { .. }
-                | ReturnTypeKind::ShouldTrustAnnotation { .. } => true,
-                _ => false,
-            }
+                    | ReturnTypeKind::ShouldTrustAnnotation { .. }
+            )
         } else {
             false
         };
@@ -400,12 +424,10 @@ impl ReportArgs {
             return false;
         }
 
-        // Check all parameters (except self/cls which don't need annotations)
+        // Check all parameters. Only the first parameter named self/cls may be unannotated.
         let all_params = Self::extract_parameters(&func_def.parameters);
-        for param in all_params {
-            let param_name = param.name.as_str();
-            // Skip self and cls parameters
-            if param_name == "self" || param_name == "cls" {
+        for (i, param) in all_params.iter().enumerate() {
+            if i == 0 && (param.name.as_str() == "self" || param.name.as_str() == "cls") {
                 continue;
             }
             if param.annotation.is_none() {
@@ -414,6 +436,42 @@ impl ReportArgs {
         }
 
         true
+    }
+
+    /// Check if a function is fully annotated based on its parsed representation.
+    /// A function is fully annotated if it has a return annotation and all parameters
+    /// have annotations. Only the first parameter named `self`/`cls` is exempt.
+    fn is_fully_annotated(function: &Function) -> bool {
+        if function.return_annotation.is_none() {
+            return false;
+        }
+        function.parameters.iter().enumerate().all(|(i, p)| {
+            (i == 0 && (p.name == "self" || p.name == "cls")) || p.annotation.is_some()
+        })
+    }
+
+    /// Calculate the aggregate summary for all file reports.
+    fn calculate_summary(files: &HashMap<String, FileReport>) -> ReportSummary {
+        let total_files = files.len();
+        let total_functions: usize = files.values().map(|f| f.functions.len()).sum();
+        let fully_annotated_functions: usize = files
+            .values()
+            .flat_map(|f| &f.functions)
+            .filter(|f| Self::is_fully_annotated(f))
+            .count();
+
+        let aggregate_annotation_completeness = if total_functions == 0 {
+            100.0
+        } else {
+            (fully_annotated_functions as f64 / total_functions as f64) * 100.0
+        };
+
+        ReportSummary {
+            total_files,
+            total_functions,
+            fully_annotated_functions,
+            aggregate_annotation_completeness,
+        }
     }
 
     fn parse_classes(
@@ -594,6 +652,15 @@ impl ReportArgs {
                 let variables =
                     Self::parse_variables(&module, &bindings, &exports, &functions, &classes);
                 let suppressions = Self::parse_suppressions(&module);
+                let annotation_completeness = if functions.is_empty() {
+                    100.0
+                } else {
+                    let annotated = functions
+                        .iter()
+                        .filter(|f| Self::is_fully_annotated(f))
+                        .count();
+                    (annotated as f64 / functions.len() as f64) * 100.0
+                };
 
                 report.insert(
                     handle.path().as_path().display().to_string(),
@@ -603,13 +670,19 @@ impl ReportArgs {
                         functions,
                         classes,
                         suppressions,
+                        annotation_completeness,
                     },
                 );
             }
         }
 
         // Output JSON
-        let json = serde_json::to_string_pretty(&report)?;
+        let summary = Self::calculate_summary(&report);
+        let full_report = FullReport {
+            files: report,
+            summary,
+        };
+        let json = serde_json::to_string_pretty(&full_report)?;
         println!("{}", json);
 
         Ok(CommandExitStatus::Success)
@@ -1118,5 +1191,196 @@ class TopLevel:
             !shadowed.contains(PathBuf::from("test2.py").as_path()),
             "test2.py should not be shadowed"
         );
+    }
+
+    #[test]
+    fn test_is_fully_annotated() {
+        /// Helper to create a Function for testing annotation completeness.
+        fn make_function(name: &str, has_return: bool, params: Vec<(&str, bool)>) -> Function {
+            Function {
+                name: name.to_owned(),
+                return_annotation: if has_return {
+                    Some("int".to_owned())
+                } else {
+                    None
+                },
+                parameters: params
+                    .into_iter()
+                    .map(|(param_name, annotated)| Parameter {
+                        name: param_name.to_owned(),
+                        annotation: if annotated {
+                            Some("str".to_owned())
+                        } else {
+                            None
+                        },
+                        location: Location { line: 1, column: 1 },
+                    })
+                    .collect(),
+                location: Location { line: 1, column: 1 },
+            }
+        }
+
+        // Fully annotated function
+        assert!(ReportArgs::is_fully_annotated(&make_function(
+            "foo",
+            true,
+            vec![("x", true)]
+        )));
+
+        // self as first param is exempt
+        assert!(ReportArgs::is_fully_annotated(&make_function(
+            "bar",
+            true,
+            vec![("self", false), ("y", true)]
+        )));
+
+        // cls as first param is exempt
+        assert!(ReportArgs::is_fully_annotated(&make_function(
+            "cls_method",
+            true,
+            vec![("cls", false)]
+        )));
+
+        // Missing return annotation
+        assert!(!ReportArgs::is_fully_annotated(&make_function(
+            "no_return",
+            false,
+            vec![]
+        )));
+
+        // Missing parameter annotation
+        assert!(!ReportArgs::is_fully_annotated(&make_function(
+            "missing_param",
+            true,
+            vec![("x", false)]
+        )));
+
+        // "self" as a non-first parameter should NOT be exempt
+        assert!(!ReportArgs::is_fully_annotated(&make_function(
+            "bad_self",
+            true,
+            vec![("x", true), ("self", false)]
+        )));
+
+        // "cls" as a non-first parameter should NOT be exempt
+        assert!(!ReportArgs::is_fully_annotated(&make_function(
+            "bad_cls",
+            true,
+            vec![("x", true), ("cls", false)]
+        )));
+
+        // No functions means 100% complete
+        let empty: Vec<Function> = vec![];
+        let summary = ReportArgs::calculate_summary(&HashMap::new());
+        assert_eq!(summary.aggregate_annotation_completeness, 100.0);
+        assert_eq!(summary.total_functions, 0);
+        assert!(empty.is_empty()); // suppress unused warning
+    }
+
+    #[test]
+    fn test_calculate_summary() {
+        /// Helper to create a Function for summary testing.
+        fn make_function(name: &str, has_return: bool, params: Vec<(&str, bool)>) -> Function {
+            Function {
+                name: name.to_owned(),
+                return_annotation: if has_return {
+                    Some("int".to_owned())
+                } else {
+                    None
+                },
+                parameters: params
+                    .into_iter()
+                    .map(|(param_name, annotated)| Parameter {
+                        name: param_name.to_owned(),
+                        annotation: if annotated {
+                            Some("str".to_owned())
+                        } else {
+                            None
+                        },
+                        location: Location { line: 1, column: 1 },
+                    })
+                    .collect(),
+                location: Location { line: 1, column: 1 },
+            }
+        }
+
+        // Single file with mixed annotation status
+        let mut single_file: HashMap<String, FileReport> = HashMap::new();
+        single_file.insert(
+            "file1.py".to_owned(),
+            FileReport {
+                variables: vec![],
+                line_count: 10,
+                functions: vec![
+                    make_function("foo", true, vec![("x", true)]),
+                    make_function("bar", false, vec![("y", true)]),
+                ],
+                classes: vec![],
+                suppressions: vec![],
+                annotation_completeness: 50.0,
+            },
+        );
+        let summary = ReportArgs::calculate_summary(&single_file);
+        assert_eq!(summary.total_files, 1);
+        assert_eq!(summary.total_functions, 2);
+        assert_eq!(summary.fully_annotated_functions, 1);
+        assert_eq!(summary.aggregate_annotation_completeness, 50.0);
+
+        // Multiple files — aggregate is weighted by function count, not averaged per file
+        let mut multi_file: HashMap<String, FileReport> = HashMap::new();
+        multi_file.insert(
+            "file1.py".to_owned(),
+            FileReport {
+                variables: vec![],
+                line_count: 10,
+                functions: vec![
+                    make_function("foo", true, vec![("x", true)]),
+                    make_function("bar", true, vec![("y", true)]),
+                ],
+                classes: vec![],
+                suppressions: vec![],
+                annotation_completeness: 100.0,
+            },
+        );
+        multi_file.insert(
+            "file2.py".to_owned(),
+            FileReport {
+                variables: vec![],
+                line_count: 20,
+                functions: vec![
+                    make_function("baz", true, vec![("z", true)]),
+                    make_function("qux", false, vec![("w", false)]),
+                ],
+                classes: vec![],
+                suppressions: vec![],
+                annotation_completeness: 50.0,
+            },
+        );
+        let summary = ReportArgs::calculate_summary(&multi_file);
+        assert_eq!(summary.total_files, 2);
+        assert_eq!(summary.total_functions, 4);
+        assert_eq!(summary.fully_annotated_functions, 3);
+        assert_eq!(summary.aggregate_annotation_completeness, 75.0);
+
+        // self/cls exemption only applies to first parameter
+        let mut with_self: HashMap<String, FileReport> = HashMap::new();
+        with_self.insert(
+            "file.py".to_owned(),
+            FileReport {
+                variables: vec![],
+                line_count: 5,
+                functions: vec![make_function(
+                    "method",
+                    true,
+                    vec![("self", false), ("x", true)],
+                )],
+                classes: vec![],
+                suppressions: vec![],
+                annotation_completeness: 100.0,
+            },
+        );
+        let summary = ReportArgs::calculate_summary(&with_self);
+        assert_eq!(summary.fully_annotated_functions, 1);
+        assert_eq!(summary.aggregate_annotation_completeness, 100.0);
     }
 }
