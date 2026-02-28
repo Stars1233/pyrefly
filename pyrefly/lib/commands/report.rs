@@ -20,6 +20,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::class::ClassDefIndex;
+use pyrefly_types::types::Type;
 use pyrefly_util::forgetter::Forgetter;
 use pyrefly_util::includes::Includes;
 use regex::Regex;
@@ -63,6 +64,8 @@ struct Location {
 struct Parameter {
     name: String,
     annotation: Option<String>,
+    /// Whether the parameter's resolved type is fully known (contains no `Any`).
+    is_type_known: bool,
     location: Location,
 }
 
@@ -79,7 +82,12 @@ struct Suppression {
 struct Function {
     name: String,
     return_annotation: Option<String>,
+    /// Whether the return type is fully known (contains no `Any`).
+    is_return_type_known: bool,
     parameters: Vec<Parameter>,
+    /// Whether the function is completely type-known (return + all params known).
+    /// This is only true for functions that are also fully annotated.
+    is_type_known: bool,
     location: Location,
 }
 
@@ -117,6 +125,8 @@ struct FileReport {
     /// Percentage of functions that are fully annotated (0.0 to 100.0).
     /// A function is fully annotated if it has return and parameter annotations present.
     annotation_completeness: f64,
+    /// Percentage of fully-annotated functions whose resolved types contain no `Any` (0.0 to 100.0).
+    type_completeness: f64,
 }
 
 /// Summary statistics for the entire report.
@@ -128,8 +138,13 @@ struct ReportSummary {
     total_functions: usize,
     /// Number of functions that are fully annotated (have annotation text).
     fully_annotated_functions: usize,
+    /// Number of fully-annotated functions whose resolved types contain no `Any`.
+    type_complete_functions: usize,
     /// Aggregate annotation completeness score across all files (0.0 to 100.0).
     aggregate_annotation_completeness: f64,
+    /// Aggregate type completeness across all files (0.0 to 100.0).
+    /// Denominator is fully_annotated_functions, not total_functions.
+    aggregate_type_completeness: f64,
 }
 
 /// Full report including per-file reports and aggregate summary.
@@ -311,7 +326,8 @@ impl ReportArgs {
 
     fn parse_functions(
         module: &Module,
-        bindings: Bindings,
+        bindings: &Bindings,
+        answers: &Answers,
         exports: &SmallMap<Name, ExportLocation>,
     ) -> Vec<Function> {
         let mut functions = Vec::new();
@@ -357,46 +373,82 @@ impl ReportArgs {
                     }
                     format!("{}{}", module_prefix, fun.def.name)
                 };
-                // Get return annotation from ReturnTypeKind
-                let return_annotation = {
-                    let return_key = Key::ReturnType(*id);
-                    let return_idx = bindings.key_to_idx(&return_key);
-                    if let Binding::ReturnType(ret) = bindings.get(return_idx) {
-                        match &ret.kind {
-                            ReturnTypeKind::ShouldValidateAnnotation { range, .. } => {
-                                Some(module.code_at(*range).to_owned())
-                            }
-                            ReturnTypeKind::ShouldTrustAnnotation { range, .. } => {
-                                Some(module.code_at(*range).to_owned())
-                            }
-                            _ => None,
+
+                // Get return annotation text and check if return type is known
+                let return_key = Key::ReturnType(*id);
+                let return_idx = bindings.key_to_idx(&return_key);
+                let return_annotation = if let Binding::ReturnType(ret) = bindings.get(return_idx) {
+                    match &ret.kind {
+                        ReturnTypeKind::ShouldValidateAnnotation { range, .. }
+                        | ReturnTypeKind::ShouldTrustAnnotation { range, .. } => {
+                            Some(module.code_at(*range).to_owned())
                         }
-                    } else {
-                        None
+                        _ => None,
                     }
+                } else {
+                    None
                 };
 
-                // Get parameters
+                // Return type is known only if an annotation is present and the resolved
+                // type contains no Any.
+                let is_return_type_known = return_annotation.is_some()
+                    && answers
+                        .get_type_at(return_idx)
+                        .is_some_and(|t| Self::is_type_fully_known(&t));
+
+                // Get parameters with their annotation and type-known status
                 let mut parameters = Vec::new();
                 let all_params = Self::extract_parameters(&fun.def.parameters);
+                let mut all_params_type_known = true;
 
-                for param in all_params {
+                for (i, param) in all_params.iter().enumerate() {
                     let param_name = param.name.as_str();
                     let param_annotation = param
                         .annotation
                         .as_ref()
                         .map(|ann| module.code_at(ann.range()).to_owned());
 
+                    // First parameter named self/cls is always considered type-known
+                    let is_param_type_known =
+                        if i == 0 && (param_name == "self" || param_name == "cls") {
+                            true
+                        } else if let Some(ann) = &param.annotation {
+                            answers
+                                .get_type_trace(ann.range())
+                                .is_some_and(|t| Self::is_type_fully_known(&t))
+                        } else {
+                            false // No annotation means not type-known
+                        };
+
+                    if !is_param_type_known
+                        && !(i == 0 && (param_name == "self" || param_name == "cls"))
+                    {
+                        all_params_type_known = false;
+                    }
+
                     parameters.push(Parameter {
                         name: param_name.to_owned(),
                         annotation: param_annotation,
+                        is_type_known: is_param_type_known,
                         location: Self::range_to_location(module, param.range),
                     });
                 }
+
+                // A function is type-known only if it is fully annotated AND
+                // its return type and all param types contain no Any.
+                let is_fully_annotated = return_annotation.is_some()
+                    && parameters.iter().enumerate().all(|(i, p)| {
+                        (i == 0 && (p.name == "self" || p.name == "cls")) || p.annotation.is_some()
+                    });
+                let is_type_known =
+                    is_fully_annotated && is_return_type_known && all_params_type_known;
+
                 functions.push(Function {
                     name: func_name,
                     return_annotation,
+                    is_return_type_known,
                     parameters,
+                    is_type_known,
                     location,
                 });
             }
@@ -450,15 +502,22 @@ impl ReportArgs {
         })
     }
 
+    /// Returns true if the type contains no `Any` anywhere in its structure.
+    fn is_type_fully_known(ty: &Type) -> bool {
+        !ty.any(|t| t.is_any())
+    }
+
     /// Calculate the aggregate summary for all file reports.
     fn calculate_summary(files: &HashMap<String, FileReport>) -> ReportSummary {
         let total_files = files.len();
-        let total_functions: usize = files.values().map(|f| f.functions.len()).sum();
-        let fully_annotated_functions: usize = files
-            .values()
-            .flat_map(|f| &f.functions)
+        let all_functions: Vec<&Function> = files.values().flat_map(|f| &f.functions).collect();
+        let total_functions = all_functions.len();
+        let fully_annotated_functions = all_functions
+            .iter()
             .filter(|f| Self::is_fully_annotated(f))
             .count();
+        // Type-complete functions are a subset of fully-annotated functions.
+        let type_complete_functions = all_functions.iter().filter(|f| f.is_type_known).count();
 
         let aggregate_annotation_completeness = if total_functions == 0 {
             100.0
@@ -466,11 +525,19 @@ impl ReportArgs {
             (fully_annotated_functions as f64 / total_functions as f64) * 100.0
         };
 
+        let aggregate_type_completeness = if fully_annotated_functions == 0 {
+            100.0
+        } else {
+            (type_complete_functions as f64 / fully_annotated_functions as f64) * 100.0
+        };
+
         ReportSummary {
             total_files,
             total_functions,
             fully_annotated_functions,
+            type_complete_functions,
             aggregate_annotation_completeness,
+            aggregate_type_completeness,
         }
     }
 
@@ -647,19 +714,26 @@ impl ReportArgs {
             {
                 let line_count = module.lined_buffer().line_index().line_count();
                 let exports = transaction.get_exports(handle);
-                let functions = Self::parse_functions(&module, bindings.dupe(), &exports);
-                let classes = Self::parse_classes(&module, bindings.dupe(), answers);
+                let functions = Self::parse_functions(&module, &bindings, &answers, &exports);
+                let classes = Self::parse_classes(&module, bindings.dupe(), answers.dupe());
                 let variables =
                     Self::parse_variables(&module, &bindings, &exports, &functions, &classes);
                 let suppressions = Self::parse_suppressions(&module);
+
+                let annotated_count = functions
+                    .iter()
+                    .filter(|f| Self::is_fully_annotated(f))
+                    .count();
                 let annotation_completeness = if functions.is_empty() {
                     100.0
                 } else {
-                    let annotated = functions
-                        .iter()
-                        .filter(|f| Self::is_fully_annotated(f))
-                        .count();
-                    (annotated as f64 / functions.len() as f64) * 100.0
+                    (annotated_count as f64 / functions.len() as f64) * 100.0
+                };
+                let type_completeness = if annotated_count == 0 {
+                    100.0
+                } else {
+                    let type_complete = functions.iter().filter(|f| f.is_type_known).count();
+                    (type_complete as f64 / annotated_count as f64) * 100.0
                 };
 
                 report.insert(
@@ -671,6 +745,7 @@ impl ReportArgs {
                         classes,
                         suppressions,
                         annotation_completeness,
+                        type_completeness,
                     },
                 );
             }
@@ -765,7 +840,7 @@ class SomeClass:
         let answers = transaction.get_answers(&handle).unwrap();
         let exports = transaction.get_exports(&handle);
 
-        let functions = ReportArgs::parse_functions(&module, bindings.dupe(), &exports);
+        let functions = ReportArgs::parse_functions(&module, &bindings, &answers, &exports);
         let classes = ReportArgs::parse_classes(&module, bindings.dupe(), answers);
         let variables =
             ReportArgs::parse_variables(&module, &bindings, &exports, &functions, &classes);
@@ -840,9 +915,10 @@ class C:
 
         let module = transaction.get_module_info(&handle).unwrap();
         let bindings = transaction.get_bindings(&handle).unwrap();
+        let answers = transaction.get_answers(&handle).unwrap();
         let exports = transaction.get_exports(&handle);
 
-        let functions = ReportArgs::parse_functions(&module, bindings, &exports);
+        let functions = ReportArgs::parse_functions(&module, &bindings, &answers, &exports);
 
         assert_eq!(functions.len(), 4);
 
@@ -908,9 +984,10 @@ def foo():
         let handle = handle_fn("__unknown__");
         let transaction = state.transaction();
         let bindings = transaction.get_bindings(&handle).unwrap();
+        let answers = transaction.get_answers(&handle).unwrap();
         let exports = transaction.get_exports(&handle);
 
-        let functions = ReportArgs::parse_functions(&module, bindings, &exports);
+        let functions = ReportArgs::parse_functions(&module, &bindings, &answers, &exports);
 
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name, "foo");
@@ -1050,9 +1127,10 @@ def top_level(x: int) -> bool:
 
         let module = transaction.get_module_info(&handle).unwrap();
         let bindings = transaction.get_bindings(&handle).unwrap();
+        let answers = transaction.get_answers(&handle).unwrap();
         let exports = transaction.get_exports(&handle);
 
-        let functions = ReportArgs::parse_functions(&module, bindings, &exports);
+        let functions = ReportArgs::parse_functions(&module, &bindings, &answers, &exports);
 
         // Only top-level functions should be reported; inner and inner2 are nested
         // inside outer and are not public symbols.
@@ -1096,9 +1174,10 @@ class TopLevel:
 
         let module = transaction.get_module_info(&handle).unwrap();
         let bindings = transaction.get_bindings(&handle).unwrap();
+        let answers = transaction.get_answers(&handle).unwrap();
         let exports = transaction.get_exports(&handle);
 
-        let functions = ReportArgs::parse_functions(&module, bindings, &exports);
+        let functions = ReportArgs::parse_functions(&module, &bindings, &answers, &exports);
         // LocalClass.method is inside a function and is not a public symbol.
         let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
         assert!(
@@ -1204,6 +1283,7 @@ class TopLevel:
                 } else {
                     None
                 },
+                is_return_type_known: has_return,
                 parameters: params
                     .into_iter()
                     .map(|(param_name, annotated)| Parameter {
@@ -1213,9 +1293,11 @@ class TopLevel:
                         } else {
                             None
                         },
+                        is_type_known: annotated,
                         location: Location { line: 1, column: 1 },
                     })
                     .collect(),
+                is_type_known: false, // Not relevant for annotation-only tests
                 location: Location { line: 1, column: 1 },
             }
         }
@@ -1280,7 +1362,12 @@ class TopLevel:
     #[test]
     fn test_calculate_summary() {
         /// Helper to create a Function for summary testing.
-        fn make_function(name: &str, has_return: bool, params: Vec<(&str, bool)>) -> Function {
+        fn make_function(
+            name: &str,
+            has_return: bool,
+            is_type_known: bool,
+            params: Vec<(&str, bool)>,
+        ) -> Function {
             Function {
                 name: name.to_owned(),
                 return_annotation: if has_return {
@@ -1288,6 +1375,7 @@ class TopLevel:
                 } else {
                     None
                 },
+                is_return_type_known: is_type_known,
                 parameters: params
                     .into_iter()
                     .map(|(param_name, annotated)| Parameter {
@@ -1297,9 +1385,11 @@ class TopLevel:
                         } else {
                             None
                         },
+                        is_type_known: annotated,
                         location: Location { line: 1, column: 1 },
                     })
                     .collect(),
+                is_type_known,
                 location: Location { line: 1, column: 1 },
             }
         }
@@ -1312,19 +1402,22 @@ class TopLevel:
                 variables: vec![],
                 line_count: 10,
                 functions: vec![
-                    make_function("foo", true, vec![("x", true)]),
-                    make_function("bar", false, vec![("y", true)]),
+                    make_function("foo", true, true, vec![("x", true)]),
+                    make_function("bar", false, false, vec![("y", true)]),
                 ],
                 classes: vec![],
                 suppressions: vec![],
                 annotation_completeness: 50.0,
+                type_completeness: 100.0,
             },
         );
         let summary = ReportArgs::calculate_summary(&single_file);
         assert_eq!(summary.total_files, 1);
         assert_eq!(summary.total_functions, 2);
         assert_eq!(summary.fully_annotated_functions, 1);
+        assert_eq!(summary.type_complete_functions, 1);
         assert_eq!(summary.aggregate_annotation_completeness, 50.0);
+        assert_eq!(summary.aggregate_type_completeness, 100.0);
 
         // Multiple files — aggregate is weighted by function count, not averaged per file
         let mut multi_file: HashMap<String, FileReport> = HashMap::new();
@@ -1334,12 +1427,13 @@ class TopLevel:
                 variables: vec![],
                 line_count: 10,
                 functions: vec![
-                    make_function("foo", true, vec![("x", true)]),
-                    make_function("bar", true, vec![("y", true)]),
+                    make_function("foo", true, true, vec![("x", true)]),
+                    make_function("bar", true, true, vec![("y", true)]),
                 ],
                 classes: vec![],
                 suppressions: vec![],
                 annotation_completeness: 100.0,
+                type_completeness: 100.0,
             },
         );
         multi_file.insert(
@@ -1348,19 +1442,22 @@ class TopLevel:
                 variables: vec![],
                 line_count: 20,
                 functions: vec![
-                    make_function("baz", true, vec![("z", true)]),
-                    make_function("qux", false, vec![("w", false)]),
+                    make_function("baz", true, true, vec![("z", true)]),
+                    make_function("qux", false, false, vec![("w", false)]),
                 ],
                 classes: vec![],
                 suppressions: vec![],
                 annotation_completeness: 50.0,
+                type_completeness: 100.0,
             },
         );
         let summary = ReportArgs::calculate_summary(&multi_file);
         assert_eq!(summary.total_files, 2);
         assert_eq!(summary.total_functions, 4);
         assert_eq!(summary.fully_annotated_functions, 3);
+        assert_eq!(summary.type_complete_functions, 3);
         assert_eq!(summary.aggregate_annotation_completeness, 75.0);
+        assert_eq!(summary.aggregate_type_completeness, 100.0);
 
         // self/cls exemption only applies to first parameter
         let mut with_self: HashMap<String, FileReport> = HashMap::new();
@@ -1372,15 +1469,45 @@ class TopLevel:
                 functions: vec![make_function(
                     "method",
                     true,
+                    true,
                     vec![("self", false), ("x", true)],
                 )],
                 classes: vec![],
                 suppressions: vec![],
                 annotation_completeness: 100.0,
+                type_completeness: 100.0,
             },
         );
         let summary = ReportArgs::calculate_summary(&with_self);
         assert_eq!(summary.fully_annotated_functions, 1);
+        assert_eq!(summary.type_complete_functions, 1);
         assert_eq!(summary.aggregate_annotation_completeness, 100.0);
+        assert_eq!(summary.aggregate_type_completeness, 100.0);
+
+        // Annotated but not type-complete (contains Any)
+        let mut with_any: HashMap<String, FileReport> = HashMap::new();
+        with_any.insert(
+            "file.py".to_owned(),
+            FileReport {
+                variables: vec![],
+                line_count: 5,
+                functions: vec![
+                    // Annotated and type-complete
+                    make_function("good", true, true, vec![("x", true)]),
+                    // Annotated but return type contains Any (not type-complete)
+                    make_function("has_any", true, false, vec![("x", true)]),
+                ],
+                classes: vec![],
+                suppressions: vec![],
+                annotation_completeness: 100.0,
+                type_completeness: 50.0,
+            },
+        );
+        let summary = ReportArgs::calculate_summary(&with_any);
+        assert_eq!(summary.fully_annotated_functions, 2);
+        assert_eq!(summary.type_complete_functions, 1);
+        assert_eq!(summary.aggregate_annotation_completeness, 100.0);
+        // Type completeness denominator is fully_annotated_functions (2), not total_functions
+        assert_eq!(summary.aggregate_type_completeness, 50.0);
     }
 }
