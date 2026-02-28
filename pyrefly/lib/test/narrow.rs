@@ -2798,3 +2798,17 @@ def f(inputs: Sequence[int]):
         assert_type(x, int)
     "#,
 );
+
+// Regression test for https://github.com/facebook/pyrefly/issues/1570
+testcase!(
+    test_narrow_not_in_dict,
+    r#"
+def example(variable: str | None) -> str:
+    str_dict = {"key": "value"}
+
+    if variable not in str_dict:
+        return "Not Found"
+
+    return variable
+"#,
+);
