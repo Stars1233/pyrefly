@@ -586,3 +586,15 @@ assert_type(d.x, Any)
 assert_type(d.greet(), str)
     "#,
 );
+
+// Regression test for https://github.com/facebook/pyrefly/issues/832
+testcase!(
+    test_functional_namedtuple_base_class_with_new,
+    r#"
+from collections import namedtuple
+
+class QConfig(namedtuple("QConfig", ["activation", "weight"])):
+    def __new__(cls, activation, weight):
+        return super().__new__(cls, activation, weight)
+"#,
+);
