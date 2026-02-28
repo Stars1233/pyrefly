@@ -1418,3 +1418,17 @@ class Pipeline:
         return self.model(data)
 "#,
 );
+
+// Regression test for https://github.com/facebook/pyrefly/issues/769
+testcase!(
+    test_callable_no_args_assignable_to_varargs,
+    r#"
+from typing import Callable
+
+def schedule(delay: int, func: Callable[..., object]) -> None: ...
+
+def after_func() -> None: ...
+
+schedule(1000, after_func)
+"#,
+);
