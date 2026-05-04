@@ -160,8 +160,11 @@ exports during binding.
   matching for the common case with solve-time validation for
   re-exports.
 - `is_final` reassignment check — fires when a name imported from
-  another module is reassigned, to confirm the imported name is not
-  `Final`.
+  another module is reassigned to a different binding, to confirm
+  the imported name is not `Final`. Duplicate re-imports of the
+  same `(module, name)` short-circuit before the lookup, so files
+  with many `if TYPE_CHECKING:` / method-local re-imports of the
+  same names don't pay this cost.
 - `get_wildcard` for `from X import *` — unavoidable; binder needs
   the set of names to create binding table entries.
 - `module_exists` for builtins — unavoidable; fixed per-module cost.

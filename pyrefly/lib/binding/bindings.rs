@@ -1686,20 +1686,25 @@ impl<'a> BindingsBuilder<'a> {
         let prev_idx = self.scopes.current_flow_idx(name);
         if let Some(prev_idx) = prev_idx
             && let Some(Binding::Import(prev)) = self.idx_to_binding(prev_idx)
-            && self.lookup.is_final(prev.module, &prev.name)
         {
-            // A duplicate import of the same symbol is not a reassignment.
+            // A duplicate import of the same symbol is not a reassignment;
+            // skip the cross-module `is_final` lookup in that case so that
+            // repeated `from X import Y` blocks (common in
+            // `if TYPE_CHECKING:` and method-local imports) don't force
+            // `Step::Exports` on the import target.
             if let Some(Binding::Import(cur)) = self.idx_to_binding(idx)
                 && cur.module == prev.module
                 && cur.name == prev.name
             {
                 return;
             }
-            self.error(
-                self.idx_to_key(idx).range(),
-                ErrorInfo::Kind(ErrorKind::BadAssignment),
-                format!("Cannot assign to `{name}` because it is imported as final"),
-            );
+            if self.lookup.is_final(prev.module, &prev.name) {
+                self.error(
+                    self.idx_to_key(idx).range(),
+                    ErrorInfo::Kind(ErrorKind::BadAssignment),
+                    format!("Cannot assign to `{name}` because it is imported as final"),
+                );
+            }
         }
     }
 
