@@ -183,18 +183,46 @@ pub struct ModuleDeps {
 pub struct ModuleChanges(pub ModuleDeps);
 
 // A single dependency, passed during lookup. Can be merged into ModuleDeps.
+//
+// The metadata-flavored lookups (`is_special_export`, `is_reexport`,
+// `get_deprecated`, `is_final`, `docstring_range`,
+// `is_submodule_imported_implicitly`) all record "depends on the
+// metadata of this name" and funnel into the same `ModuleDeps` slot.
+// They're kept distinct so the demand tree can label each lookup
+// precisely; the shared funneling lives in `ModuleDeps::add_dep`.
 pub enum ModuleDep {
-    // Depend on the existence of a module
+    /// Depend on the existence of a module.
     Exists,
-    // Depend on the TypeEq result of an exported key
+    /// Depend on the TypeEq result of an exported key. Used by
+    /// `LookupAnswer` to track value-level dependencies on specific
+    /// exported computations.
     Key(AnyExportedKey),
-    // Depend on the existence of an exported name, not necessarily it's type
+    /// `LookupExport::export_exists` — depends on whether a name is
+    /// exported, not on its type.
     NameExists(Name),
-    // Depend on metadata (deprecation, docstring) of an exported name
+    /// Depend on metadata (deprecation, docstring, etc.) of an exported
+    /// name. The metadata-flavored `LookupExport` variants below all
+    /// funnel here.
     NameMetadata(Name),
-    // Depend on the set of wildcard exported names
+    /// `LookupExport::is_special_export`.
+    IsSpecialExport(Name),
+    /// `LookupExport::is_reexport`.
+    IsReexport(Name),
+    /// `LookupExport::get_deprecated`.
+    GetDeprecated(Name),
+    /// `LookupExport::is_final`.
+    IsFinal(Name),
+    /// `LookupExport::docstring_range`.
+    DocstringRange(Name),
+    /// `LookupExport::is_submodule_imported_implicitly`.
+    IsSubmoduleImportedImplicitly(Name),
+    /// `LookupExport::get_wildcard` — depends on the wildcard export set.
     Wildcard,
-    // Depend on a class definition (fields, metadata, etc.)
+    /// `LookupExport::get_every_export_untracked` — intentionally
+    /// existence-level only; used by call sites that want every export
+    /// without establishing per-name dependencies.
+    EveryExportUntracked,
+    /// Depend on a class definition (fields, metadata, etc.).
     Class(ClassDefIndex),
 }
 
@@ -290,12 +318,18 @@ impl ModuleDeps {
 
     pub fn add_dep(&mut self, dep: ModuleDep) {
         match dep {
-            ModuleDep::Exists => {}
+            ModuleDep::Exists | ModuleDep::EveryExportUntracked => {}
             ModuleDep::Key(key) => self.add_key(key),
             ModuleDep::NameExists(name) => {
                 self.names.entry(name).or_default();
             }
-            ModuleDep::NameMetadata(name) => {
+            ModuleDep::NameMetadata(name)
+            | ModuleDep::IsSpecialExport(name)
+            | ModuleDep::IsReexport(name)
+            | ModuleDep::GetDeprecated(name)
+            | ModuleDep::IsFinal(name)
+            | ModuleDep::DocstringRange(name)
+            | ModuleDep::IsSubmoduleImportedImplicitly(name) => {
                 self.names.entry(name).or_default().metadata = true;
             }
             ModuleDep::Wildcard => {
