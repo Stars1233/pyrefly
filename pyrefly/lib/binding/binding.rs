@@ -2066,6 +2066,27 @@ pub struct ImportBinding {
     /// aliases, and `from X import *` wildcards) where emitting
     /// per-name deprecation would be noise.
     pub check_deprecated: Option<TextRange>,
+    /// If `Some`, the caller did NOT verify the name exists at bind
+    /// time (so that the target module's Exports were not forced). At
+    /// solve time, if the name is missing from the module's Exports,
+    /// the solver falls back to the submodule / `__getattr__` /
+    /// missing-attribute cascade. If `None`, the caller verified
+    /// existence (wildcards, builtins injection, legacy typing aliases)
+    /// and the solver may safely assume the export exists.
+    pub fallback: Option<ImportFallback>,
+}
+
+/// Information required by the solve-time fallback cascade for
+/// [`ImportBinding::fallback`].
+#[derive(Clone, Debug)]
+pub struct ImportFallback {
+    /// Range to report a `MissingModuleAttribute` error at, if the name
+    /// cannot be resolved by any fallback path.
+    pub stmt_range: TextRange,
+    /// If true, the import site is dead code (statically unreachable).
+    /// Suppress the missing-attribute error in that case — the bind-time
+    /// logic did the same via `is_unreachable_from_static_test`.
+    pub is_unreachable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2138,9 +2159,6 @@ pub enum Binding {
     ),
     /// An import statement, typically with `Self::Import`.
     Import(Box<ImportBinding>),
-    /// An import via module-level __getattr__ for incomplete stubs.
-    /// See: https://typing.python.org/en/latest/guides/writing_stubs.html#incomplete-stubs
-    ImportViaGetattr(Box<(ModuleName, Name)>),
     /// A class definition, points to a BindingClass and any decorators.
     ClassDef(Idx<KeyClass>, Box<[Idx<KeyDecorator>]>),
     /// A forward reference to another binding.
@@ -2310,13 +2328,13 @@ impl DisplayWith<Bindings> for Binding {
             Self::Import(x) => {
                 write!(
                     f,
-                    "Import({}, {}, {:?}, check_dep={:?})",
-                    x.module, x.name, x.original_name_range, x.check_deprecated
+                    "Import({}, {}, {:?}, check_dep={:?}, fallback={})",
+                    x.module,
+                    x.name,
+                    x.original_name_range,
+                    x.check_deprecated,
+                    x.fallback.is_some()
                 )
-            }
-            Self::ImportViaGetattr(x) => {
-                let (m, n) = x.as_ref();
-                write!(f, "ImportViaGetattr({m}, {n})")
             }
             Self::ClassDef(x, _) => write!(f, "ClassDef({})", ctx.display(*x)),
             Self::Forward(k) => write!(f, "Forward({})", ctx.display(*k)),
@@ -2534,7 +2552,7 @@ impl Binding {
                     Some(SymbolKind::Function)
                 }
             }
-            Binding::Import(_) | Binding::ImportViaGetattr(_) => {
+            Binding::Import(_) => {
                 // TODO: maybe we can resolve it to see its symbol kind
                 Some(SymbolKind::Variable)
             }

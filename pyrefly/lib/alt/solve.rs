@@ -94,6 +94,7 @@ use crate::binding::binding::ExprOrBinding;
 use crate::binding::binding::FirstUse;
 use crate::binding::binding::FunctionParameter;
 use crate::binding::binding::ImportBinding;
+use crate::binding::binding::ImportFallback;
 use crate::binding::binding::IsAsync;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
@@ -132,6 +133,8 @@ use crate::export::deprecation::parse_deprecation;
 use crate::export::special::SpecialExport;
 use crate::solver::solver::PinError;
 use crate::solver::solver::SubsetError;
+use crate::state::loader::FindError;
+use crate::state::loader::FindingOrError;
 use crate::types::annotation::Annotation;
 use crate::types::annotation::Qualifier;
 use crate::types::callable::Callable;
@@ -4156,20 +4159,101 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         result
     }
 
-    /// Resolve a `Binding::Import`, emitting a deprecation warning if the
-    /// imported name is marked deprecated. `check_deprecated` is set only
-    /// for user-written explicit `from X import Y`; implicit bindings
-    /// (builtins wildcard, legacy typing aliases, `from X import *`) skip
-    /// the check so no new warnings appear for symbols the user never named.
+    /// Resolve a `Binding::Import`. Two modes:
+    ///
+    /// * `fallback = None`: the name was pre-verified at bind time
+    ///   (wildcards, builtins injection, legacy typing aliases). Demand
+    ///   `KeyExport(name)` directly.
+    ///
+    /// * `fallback = Some`: run the full cascade. Order depends on
+    ///   whether this is a self-import (`from x import y` while we are
+    ///   checking module `x`):
+    ///
+    ///   * Cross-module: exported name → submodule `m.name` →
+    ///     `m.__getattr__` → missing-attribute (with `Any` fallback).
+    ///   * Self-import: skip the export check (Python prefers the
+    ///     submodule when both an `__init__.py`-defined name and a
+    ///     submodule of the same name exist), so submodule →
+    ///     `__getattr__` → missing-attribute.
+    ///
+    /// `check_deprecated` is set only for user-written explicit
+    /// `from X import Y`; implicit bindings (builtins wildcard, legacy
+    /// typing aliases, `from X import *`) skip the deprecation check so
+    /// no new warnings appear for symbols the user never named.
     fn solve_import(&self, x: &ImportBinding, errors: &ErrorCollector) -> Type {
-        if let Some(range) = x.check_deprecated
-            && let Some(deprecation) = self.exports.get_deprecated(x.module, &x.name)
-        {
-            let msg = deprecation.as_error_message(format!("`{}` is deprecated", x.name));
-            errors.add(range, ErrorInfo::Kind(ErrorKind::Deprecated), msg);
+        let m = x.module;
+        let name = &x.name;
+        let resolve_export = || {
+            if let Some(range) = x.check_deprecated
+                && let Some(deprecation) = self.exports.get_deprecated(m, name)
+            {
+                let msg = deprecation.as_error_message(format!("`{name}` is deprecated"));
+                errors.add(range, ErrorInfo::Kind(ErrorKind::Deprecated), msg);
+            }
+            self.get_from_export(m, None, &KeyExport(name.clone()))
+                .arc_clone()
+        };
+        let Some(fallback) = &x.fallback else {
+            // Pre-verified existence: fast path.
+            return resolve_export();
+        };
+        let is_self_import = m == self.module().name();
+        // Cross-module imports check the export first; self-imports
+        // skip directly to the submodule (matches Python: when both an
+        // `__init__.py`-defined name and a submodule of the same name
+        // exist, Python prefers the submodule).
+        if !is_self_import && self.exports.export_exists(m, name) {
+            return resolve_export();
         }
-        self.get_from_export(x.module, None, &KeyExport(x.name.clone()))
-            .arc_clone()
+        // Submodule lookup.
+        let submodule_name = m.append(name);
+        let submodule_error = match self.exports.module_exists(submodule_name) {
+            FindingOrError::Finding(_) => {
+                return self.binding_to_type_module(
+                    submodule_name,
+                    &submodule_name.components(),
+                    None,
+                );
+            }
+            FindingOrError::Error(e) => e,
+        };
+        // `__getattr__` fallback: a module-level `__getattr__` makes
+        // any attribute access succeed at runtime via its return type.
+        if self.exports.export_exists(m, &dunder::GETATTR) {
+            let getattr_ty = self
+                .get_from_export(m, None, &KeyExport(dunder::GETATTR.clone()))
+                .arc_clone();
+            return getattr_ty
+                .callable_return_type(self.heap)
+                .unwrap_or_else(|| self.heap.mk_any_implicit());
+        }
+        self.solve_import_missing(name, m, fallback, submodule_error, errors)
+    }
+
+    /// Final missing-attribute step of `solve_import`'s cascade. Emits
+    /// the diagnostic (suppressed in dead code) and returns an `Any`.
+    /// `Any(Error)` for the not-found case, `Any(Implicit)` for other
+    /// non-fatal lookup errors.
+    fn solve_import_missing(
+        &self,
+        name: &Name,
+        m: ModuleName,
+        fallback: &ImportFallback,
+        submodule_error: FindError,
+        errors: &ErrorCollector,
+    ) -> Type {
+        if matches!(submodule_error, FindError::MissingImport(..)) {
+            if !fallback.is_unreachable {
+                errors.add(
+                    fallback.stmt_range,
+                    ErrorInfo::Kind(ErrorKind::MissingModuleAttribute),
+                    vec1![format!("Could not import `{name}` from `{m}`")],
+                );
+            }
+            self.heap.mk_any_error()
+        } else {
+            self.heap.mk_any_implicit()
+        }
     }
 
     /// The `#[inline(never)]` annotation is intentional to reduce stack frame size.
@@ -5045,16 +5129,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.solve_function_binding(def, &mut pred, class_meta.as_ref(), errors)
             }
             Binding::Import(x) => self.solve_import(x, errors),
-            Binding::ImportViaGetattr(x) => {
-                // Import via module-level __getattr__ for incomplete stubs.
-                // Get the return type of __getattr__.
-                let getattr_ty = self
-                    .get_from_export(x.0, None, &KeyExport(dunder::GETATTR.clone()))
-                    .arc_clone();
-                getattr_ty
-                    .callable_return_type(self.heap)
-                    .unwrap_or_else(|| self.heap.mk_any_implicit())
-            }
             Binding::ClassDef(x, _decorators) => match &self.get_idx(*x).0 {
                 None => self.heap.mk_any_implicit(),
                 Some(cls) => {

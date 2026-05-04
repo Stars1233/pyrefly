@@ -1067,10 +1067,10 @@ Definition Result:
 #[test]
 fn unresolved_no_hop_import_test() {
     // `from x import Y` where `x` doesn't define `Y` and has no
-    // fallback. Go-to-def lands at the import statement. Compare
-    // with `unresolved_multi_hop_import_test`, which today returns
-    // no definition because the chase succeeds at the first hop
-    // and bottoms out at the second.
+    // fallback. Go-to-def lands at the import statement -- the
+    // import-site fallback in `resolve_intermediate_definition`
+    // gives the user somewhere meaningful to land when the chase
+    // finds nothing.
     let code_x: &str = r#"
 "#;
     let code_test: &str = r#"
@@ -1101,10 +1101,8 @@ Definition Result:
 #[test]
 fn unresolved_multi_hop_import_test() {
     // `from x import Y` where `x` re-exports `Y` from `z` but `z`
-    // doesn't define `Y`. Go-to-def returns no definition --
-    // unlike `unresolved_no_hop_import_test`, which lands at the
-    // import statement. A later diff in the stack unifies these
-    // by falling back to the import site for both shapes.
+    // doesn't define `Y`. Go-to-def lands at the import statement,
+    // matching `unresolved_no_hop_import_test`.
     let code_z: &str = r#"
 "#;
     let code_x: &str = r#"
@@ -1123,7 +1121,9 @@ from x import Y
 # main.py
 2 | from x import Y
                   ^
-Definition Result: None
+Definition Result:
+2 | from x import Y
+                  ^
 
 
 # x.py
@@ -1137,9 +1137,9 @@ Definition Result: None
 
 #[test]
 fn unresolved_no_hop_missing_module_test() {
-    // `from x import Y` where `x` itself can't be found. Same as
-    // `unresolved_no_hop_import_test`: go-to-def lands at the
-    // import statement.
+    // `from x import Y` where `x` itself can't be found. Same
+    // import-site fallback as `unresolved_no_hop_import_test`:
+    // go-to-def lands at the import statement.
     let code_test: &str = r#"
 from x import Y
 #             ^
@@ -1163,8 +1163,9 @@ Definition Result:
 #[test]
 fn unresolved_multi_hop_missing_module_test() {
     // `from x import Y` where `x` re-exports `from z import Y`
-    // but `z` itself can't be found. Go-to-def returns no
-    // definition.
+    // but `z` itself can't be found. Same result as
+    // `unresolved_multi_hop_import_test`: lands at the import
+    // statement.
     let code_x: &str = r#"
 from z import Y
 "#;
@@ -1181,7 +1182,9 @@ from x import Y
 # main.py
 2 | from x import Y
                   ^
-Definition Result: None
+Definition Result:
+2 | from x import Y
+                  ^
 
 
 # x.py

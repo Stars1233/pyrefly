@@ -1236,19 +1236,58 @@ impl<'a> Transaction<'a> {
         let mut gas = RESOLVE_EXPORT_INITIAL_GAS;
         let mut name = name;
         while !gas.stop() {
-            let handle = self.import_handle_with_preference(handle, m, preference)?;
-            match self.get_exports(&handle).get(&name) {
-                Some(ExportLocation::ThisModule(export)) => {
-                    return Some((handle.clone(), export.clone()));
-                }
-                Some(ExportLocation::OtherModule(module, aliased_name)) => {
-                    if let Some(aliased_name) = aliased_name {
-                        name = aliased_name.clone();
+            let (hop_handle, location) =
+                match self.lookup_export_location_with_pyi_fallback(handle, m, &name, preference) {
+                    Some(found) => found,
+                    None => {
+                        // The name isn't exported by `m` in either style.
+                        // Try fallbacks in order: a submodule `m.name`,
+                        // then a module-level `__getattr__` on `m`. The
+                        // guard handles the case where the missing name
+                        // is itself `__getattr__`: no point treating
+                        // `__getattr__` as a submodule, and we'd otherwise
+                        // spin recursively looking for `__getattr__`'s
+                        // `__getattr__` until the gas runs out.
+                        if name == *dunder::GETATTR {
+                            return None;
+                        }
+                        let submodule = m.append(&name);
+                        if let Some(sub_handle) =
+                            self.import_handle_with_preference(handle, submodule, preference)
+                        {
+                            let docstring_range = self.get_module_docstring_range(&sub_handle);
+                            return Some((
+                                sub_handle,
+                                Export {
+                                    location: TextRange::default(),
+                                    symbol_kind: Some(SymbolKind::Module),
+                                    docstring_range,
+                                    deprecation: None,
+                                    is_final: false,
+                                    special_export: None,
+                                },
+                            ));
+                        }
+                        return self.resolve_named_import(
+                            handle,
+                            m,
+                            dunder::GETATTR.clone(),
+                            preference,
+                        );
                     }
-                    if *module == m && handle.path().is_init() {
+                };
+            match location {
+                ExportLocation::ThisModule(export) => {
+                    return Some((hop_handle, export));
+                }
+                ExportLocation::OtherModule(module, aliased_name) => {
+                    if let Some(aliased_name) = aliased_name {
+                        name = aliased_name;
+                    }
+                    if module == m && hop_handle.path().is_init() {
                         let submodule = m.append(&name);
                         let sub_handle =
-                            self.import_handle_with_preference(&handle, submodule, preference)?;
+                            self.import_handle_with_preference(&hop_handle, submodule, preference)?;
                         let docstring_range = self.get_module_docstring_range(&sub_handle);
                         return Some((
                             sub_handle,
@@ -1262,30 +1301,44 @@ impl<'a> Transaction<'a> {
                             },
                         ));
                     }
-                    m = *module;
-                }
-                None => {
-                    // The name isn't an export of `m`. If `m` exposes a
-                    // module-level `__getattr__`, `from m import name`
-                    // succeeds at runtime through the dunder's return
-                    // value — point go-to-def at wherever `__getattr__`
-                    // ultimately lives. Recurse so the loop's re-export
-                    // chasing applies to `__getattr__` too. The guard
-                    // prevents infinite recursion when `__getattr__`
-                    // itself isn't found.
-                    if name == *dunder::GETATTR {
-                        return None;
-                    }
-                    return self.resolve_named_import(
-                        &handle,
-                        m,
-                        dunder::GETATTR.clone(),
-                        preference,
-                    );
+                    m = module;
                 }
             }
         }
         None
+    }
+
+    /// Look up `name` in `m`'s exports.
+    ///
+    /// `import_handle_with_preference` already handles file-level
+    /// fallback (e.g., returns the `.pyi` handle when `.py` is
+    /// requested but only `.pyi` exists). On top of that, this adds
+    /// a name-level fallback: if the preferred-style file exists
+    /// but doesn't define `name`, try the other style at this hop.
+    /// Together, the two layers ensure we miss `name` only when
+    /// neither style defines it.
+    fn lookup_export_location_with_pyi_fallback(
+        &self,
+        origin: &Handle,
+        m: ModuleName,
+        name: &Name,
+        preference: FindPreference,
+    ) -> Option<(Handle, ExportLocation)> {
+        let primary = self.import_handle_with_preference(origin, m, preference)?;
+        if let Some(loc) = self.get_exports(&primary).get(name) {
+            return Some((primary, loc.clone()));
+        }
+        let fallback_pref = FindPreference {
+            prefer_pyi: !preference.prefer_pyi,
+            ..preference
+        };
+        let secondary = self.import_handle_with_preference(origin, m, fallback_pref)?;
+        if secondary == primary {
+            return None;
+        }
+        self.get_exports(&secondary)
+            .get(name)
+            .map(|loc| (secondary, loc.clone()))
     }
 
     /// The behavior of import resolution depends on `preference.import_behavior`:
@@ -1306,24 +1359,31 @@ impl<'a> Transaction<'a> {
                 name,
                 original_name_range,
             ) => {
-                let (def_handle, export) =
-                    self.resolve_named_import(handle, module_name, name, preference)?;
-                // Determine whether to stop at the import or follow through
-                let should_stop_at_import = match preference.import_behavior {
-                    ImportBehavior::StopAtEverything => {
-                        // Stop at ALL imports
-                        true
-                    }
-                    ImportBehavior::StopAtRenamedImports => {
-                        // Stop only at renamed imports
-                        original_name_range.is_some()
-                    }
-                    ImportBehavior::JumpThroughEverything => {
-                        // Follow through all imports
-                        false
-                    }
+                let Some((def_handle, export)) =
+                    self.resolve_named_import(handle, module_name, name, preference)
+                else {
+                    // The import target is unresolvable through any
+                    // chase path (export, submodule, `__getattr__`).
+                    // Fall back to the import statement itself so the
+                    // user lands somewhere meaningful instead of
+                    // getting no result at all.
+                    return Some((
+                        handle.dupe(),
+                        Export {
+                            location: import_key,
+                            symbol_kind: Some(SymbolKind::Variable),
+                            docstring_range: None,
+                            deprecation: None,
+                            is_final: false,
+                            special_export: None,
+                        },
+                    ));
                 };
-
+                let should_stop_at_import = match preference.import_behavior {
+                    ImportBehavior::StopAtEverything => true,
+                    ImportBehavior::StopAtRenamedImports => original_name_range.is_some(),
+                    ImportBehavior::JumpThroughEverything => false,
+                };
                 if should_stop_at_import {
                     Some((
                         handle.dupe(),
@@ -2333,16 +2393,14 @@ impl<'a> Transaction<'a> {
         handle: &Handle,
         position: TextSize,
     ) -> Result<Vec<TextRangeWithModule>, EmptyResponseReason> {
-        let definitions = self
-            .find_definition(
-                handle,
-                position,
-                FindPreference {
-                    prefer_pyi: false,
-                    ..Default::default()
-                },
-            )
-            .or_else(|_| self.find_definition(handle, position, FindPreference::default()));
+        let definitions = self.find_definition(
+            handle,
+            position,
+            FindPreference {
+                prefer_pyi: false,
+                ..Default::default()
+            },
+        );
 
         definitions.map(|defs| {
             defs.into_vec()

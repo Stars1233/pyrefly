@@ -143,21 +143,6 @@ fn create_intermediate_definition_from(
                     x.original_name_range,
                 ));
             }
-            Binding::ImportViaGetattr(x) => {
-                // Treated identically to `Binding::Import`: emit a
-                // `NamedImport` with the original imported name. The
-                // `__getattr__` jump happens inside
-                // `resolve_named_import`, which falls back to the
-                // module's `__getattr__` after the export lookup misses
-                // — exactly the situation that produced this binding at
-                // bind time.
-                return Some(IntermediateDefinition::NamedImport(
-                    def_key.range(),
-                    x.0,
-                    x.1.clone(),
-                    None,
-                ));
-            }
             Binding::Module(x) => {
                 let imported_module_name = if x.1.len() == 1 {
                     // This corresponds to the case for `import x.y` -- the corresponding key would

@@ -1080,6 +1080,12 @@ impl<'a> BindingsBuilder<'a> {
                             name: name.clone(),
                             original_name_range: None,
                             check_deprecated: None,
+                            // Caller (inject_builtins) got this name from
+                            // `get_wildcard(builtins)`, so the name is known
+                            // to exist in builtins's exports. Implicit
+                            // builtins injection: do not emit deprecation
+                            // warnings.
+                            fallback: None,
                         })),
                     );
                     self.bind_name(name, idx, FlowStyle::Import(builtins_module, name.clone()));
@@ -2100,8 +2106,7 @@ impl<'a> BindingsBuilder<'a> {
                     Binding::TypeVar(..)
                     | Binding::ParamSpec(..)
                     | Binding::TypeVarTuple(..)
-                    | Binding::Import(..)
-                    | Binding::ImportViaGetattr(..),
+                    | Binding::Import(..),
                 )
                 | None => Some((
                     KeyLegacyTypeParam(ShortIdentifier::new(name)),
