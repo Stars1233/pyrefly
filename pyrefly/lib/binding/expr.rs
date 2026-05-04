@@ -10,7 +10,6 @@ use pyrefly_python::ast::Ast;
 use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_util::visit::VisitMut;
-use ruff_python_ast::Arguments;
 use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::BoolOp;
 use ruff_python_ast::Comprehension;
@@ -757,168 +756,165 @@ impl<'a> BindingsBuilder<'a> {
                     self.finish_bool_op_fork();
                 }
             }
-            Expr::Call(call)
-                if matches!(
-                    self.as_special_export(&call.func),
-                    Some(SpecialExport::CollectionsNamedTuple | SpecialExport::TypingNamedTuple)
-                ) && matches!(call.arguments.args.first(), Some(Expr::StringLiteral(_))) =>
-            {
-                let kind = self
-                    .as_special_export(&call.func)
-                    .expect("guard already matched");
-                self.bind_inline_functional_named_tuple(call, kind);
-            }
-            Expr::Call(ExprCall {
-                node_index: _,
-                range: _,
-                func,
-                arguments,
-            }) if self.as_special_export(func) == Some(SpecialExport::AssertType)
-                && arguments.args.len() > 1 =>
-            {
-                // Handle forward references in the second argument to an assert_type call
-                self.ensure_expr(func, usage);
-                for (i, arg) in arguments.args.iter_mut().enumerate() {
-                    if i == 1 {
-                        self.ensure_type(arg, &mut None);
-                    } else {
-                        self.ensure_expr(arg, usage);
+            Expr::Call(call) => {
+                // The `as_special_export` call is load-bearing for
+                // binding-variant choice — it drives a demand edge to
+                // `target::Exports`.
+                let special = self.as_special_export(&call.func);
+                let call_range = call.range;
+                match special {
+                    Some(
+                        SpecialExport::CollectionsNamedTuple | SpecialExport::TypingNamedTuple,
+                    ) if matches!(call.arguments.args.first(), Some(Expr::StringLiteral(_))) => {
+                        let kind = special.expect("guard already matched");
+                        self.bind_inline_functional_named_tuple(call, kind);
+                        return;
                     }
+                    Some(SpecialExport::AssertType) if call.arguments.args.len() > 1 => {
+                        // Forward-reference support in the second argument to an `assert_type` call.
+                        self.ensure_expr(&mut call.func, usage);
+                        for (i, arg) in call.arguments.args.iter_mut().enumerate() {
+                            if i == 1 {
+                                self.ensure_type(arg, &mut None);
+                            } else {
+                                self.ensure_expr(arg, usage);
+                            }
+                        }
+                        for kw in call.arguments.keywords.iter_mut() {
+                            self.ensure_expr(&mut kw.value, usage);
+                        }
+                        return;
+                    }
+                    Some(SpecialExport::Cast) if !call.arguments.is_empty() => {
+                        // Forward-reference support in the first argument to a `cast` call.
+                        self.ensure_expr(&mut call.func, usage);
+                        if let Some(arg) = call.arguments.args.first_mut() {
+                            self.ensure_type(arg, &mut None)
+                        }
+                        for arg in call.arguments.args.iter_mut().skip(1) {
+                            self.ensure_expr(arg, usage);
+                        }
+                        for kw in call.arguments.keywords.iter_mut() {
+                            if let Some(id) = &kw.arg
+                                && id.as_str() == "typ"
+                            {
+                                self.ensure_type(&mut kw.value, &mut None);
+                            } else {
+                                self.ensure_expr(&mut kw.value, usage);
+                            }
+                        }
+                        return;
+                    }
+                    Some(SpecialExport::TypeForm) if !call.arguments.is_empty() => {
+                        // `TypeForm(expr)` — treat the argument as a type expression.
+                        self.ensure_expr(&mut call.func, usage);
+                        if let Some(arg) = call.arguments.args.first_mut() {
+                            self.ensure_type(arg, &mut None)
+                        }
+                        for arg in call.arguments.args.iter_mut().skip(1) {
+                            self.ensure_expr(arg, usage);
+                        }
+                        for kw in call.arguments.keywords.iter_mut() {
+                            self.ensure_expr(&mut kw.value, usage);
+                        }
+                        return;
+                    }
+                    Some(SpecialExport::Super) => {
+                        self.ensure_expr(&mut call.func, usage);
+                        for kw in call.arguments.keywords.iter_mut() {
+                            self.ensure_expr(&mut kw.value, usage);
+                            unexpected_keyword(
+                                &|msg| {
+                                    self.error(
+                                        call_range,
+                                        ErrorInfo::Kind(ErrorKind::UnexpectedKeyword),
+                                        msg,
+                                    )
+                                },
+                                "super",
+                                kw,
+                            );
+                        }
+                        let nargs = call.arguments.args.len();
+                        let style = if nargs == 0 {
+                            match self.scopes.current_method_and_class() {
+                                Some((method, class_idx)) => {
+                                    SuperStyle::ImplicitArgs(class_idx, method)
+                                }
+                                None => {
+                                    self.error(
+                                        call_range,
+                                        ErrorInfo::Kind(ErrorKind::InvalidSuperCall),
+                                        "`super` call with no arguments is valid only inside a method"
+                                            .to_owned(),
+                                    );
+                                    SuperStyle::Any
+                                }
+                            }
+                        } else if nargs == 2 {
+                            let mut bind = |expr: &mut Expr| {
+                                self.ensure_expr(expr, usage);
+                                self.insert_binding(
+                                    Key::Anon(expr.range()),
+                                    Binding::Expr(None, Box::new(expr.clone())),
+                                )
+                            };
+                            let cls_key = bind(&mut call.arguments.args[0]);
+                            let obj_key = bind(&mut call.arguments.args[1]);
+                            SuperStyle::ExplicitArgs(cls_key, obj_key)
+                        } else {
+                            if nargs != 1 {
+                                // Calling super() with one argument is technically legal:
+                                // https://stackoverflow.com/a/30190341.
+                                // This is a very niche use case, and we don't support it aside from not erroring.
+                                self.error(
+                                    call_range,
+                                    ErrorInfo::Kind(ErrorKind::InvalidSuperCall),
+                                    format!("`super` takes at most 2 arguments, got {nargs}"),
+                                );
+                            }
+                            for arg in call.arguments.args.iter_mut() {
+                                self.ensure_expr(arg, usage);
+                            }
+                            SuperStyle::Any
+                        };
+                        self.insert_binding(
+                            Key::SuperInstance(call_range),
+                            Binding::SuperInstance(Box::new((style, call_range))),
+                        );
+                        return;
+                    }
+                    _ => {}
                 }
-                for kw in arguments.keywords.iter_mut() {
-                    self.ensure_expr(&mut kw.value, usage);
-                }
-            }
-            Expr::Call(ExprCall {
-                node_index: _,
-                range: _,
-                func,
-                arguments,
-            }) if self.as_special_export(func) == Some(SpecialExport::Cast)
-                && !arguments.is_empty() =>
-            {
-                // Handle forward references in the first argument to a cast call
-                self.ensure_expr(func, usage);
-                if let Some(arg) = arguments.args.first_mut() {
-                    self.ensure_type(arg, &mut None)
-                }
-                for arg in arguments.args.iter_mut().skip(1) {
-                    self.ensure_expr(arg, usage);
-                }
-                for kw in arguments.keywords.iter_mut() {
-                    if let Some(id) = &kw.arg
-                        && id.as_str() == "typ"
-                    {
-                        self.ensure_type(&mut kw.value, &mut None);
-                    } else {
+                // `as_assert_in_test` is *not* a SpecialExport — it is a
+                // different classification of the callee. Its relative
+                // order with respect to the Exit/Quit/OsExit branch is
+                // preserved from the pre-refactor match.
+                if let Some(test_assert) = self.as_assert_in_test(&call.func)
+                    && let Some(narrow_op) = test_assert.to_narrow_ops(self, &call.arguments.args)
+                {
+                    self.ensure_expr(&mut call.func, usage);
+                    for arg in call.arguments.args.iter_mut() {
+                        self.ensure_expr(arg, &mut Usage::narrowing_from(usage));
+                    }
+                    for kw in call.arguments.keywords.iter_mut() {
                         self.ensure_expr(&mut kw.value, usage);
                     }
+                    self.bind_narrow_ops(&narrow_op, NarrowUseLocation::Span(call_range), usage);
+                    return;
                 }
-            }
-            // TypeForm(expr) — treat the argument as a type expression (forward reference support)
-            Expr::Call(ExprCall {
-                node_index: _,
-                range: _,
-                func,
-                arguments,
-            }) if self.as_special_export(func) == Some(SpecialExport::TypeForm)
-                && !arguments.is_empty() =>
-            {
-                self.ensure_expr(func, usage);
-                if let Some(arg) = arguments.args.first_mut() {
-                    self.ensure_type(arg, &mut None)
+                if matches!(
+                    special,
+                    Some(SpecialExport::Exit | SpecialExport::Quit | SpecialExport::OsExit)
+                ) {
+                    x.recurse_mut(&mut |x| self.ensure_expr(x, usage));
+                    // Control flow doesn't proceed after sys.exit(),
+                    // exit(), quit(), or os._exit().
+                    self.scopes.mark_flow_termination(false);
+                    return;
                 }
-                for arg in arguments.args.iter_mut().skip(1) {
-                    self.ensure_expr(arg, usage);
-                }
-                for kw in arguments.keywords.iter_mut() {
-                    self.ensure_expr(&mut kw.value, usage);
-                }
-            }
-            Expr::Call(ExprCall {
-                node_index: _,
-                range,
-                func,
-                arguments:
-                    Arguments {
-                        node_index: _,
-                        range: _,
-                        args: posargs,
-                        keywords,
-                    },
-            }) if self.as_special_export(func) == Some(SpecialExport::Super) => {
-                self.ensure_expr(func, usage);
-                for kw in keywords {
-                    self.ensure_expr(&mut kw.value, usage);
-                    unexpected_keyword(
-                        &|msg| {
-                            self.error(*range, ErrorInfo::Kind(ErrorKind::UnexpectedKeyword), msg)
-                        },
-                        "super",
-                        kw,
-                    );
-                }
-                let nargs = posargs.len();
-                let style = if nargs == 0 {
-                    match self.scopes.current_method_and_class() {
-                        Some((method, class_idx)) => SuperStyle::ImplicitArgs(class_idx, method),
-                        None => {
-                            self.error(
-                                *range,
-                                ErrorInfo::Kind(ErrorKind::InvalidSuperCall),
-                                "`super` call with no arguments is valid only inside a method"
-                                    .to_owned(),
-                            );
-                            SuperStyle::Any
-                        }
-                    }
-                } else if nargs == 2 {
-                    let mut bind = |expr: &mut Expr| {
-                        self.ensure_expr(expr, usage);
-                        self.insert_binding(
-                            Key::Anon(expr.range()),
-                            Binding::Expr(None, Box::new(expr.clone())),
-                        )
-                    };
-                    let cls_key = bind(&mut posargs[0]);
-                    let obj_key = bind(&mut posargs[1]);
-                    SuperStyle::ExplicitArgs(cls_key, obj_key)
-                } else {
-                    if nargs != 1 {
-                        // Calling super() with one argument is technically legal: https://stackoverflow.com/a/30190341.
-                        // This is a very niche use case, and we don't support it aside from not erroring.
-                        self.error(
-                            *range,
-                            ErrorInfo::Kind(ErrorKind::InvalidSuperCall),
-                            format!("`super` takes at most 2 arguments, got {nargs}"),
-                        );
-                    }
-                    for arg in posargs {
-                        self.ensure_expr(arg, usage);
-                    }
-                    SuperStyle::Any
-                };
-                self.insert_binding(
-                    Key::SuperInstance(*range),
-                    Binding::SuperInstance(Box::new((style, *range))),
-                );
-            }
-            Expr::Call(ExprCall {
-                node_index: _,
-                range,
-                func,
-                arguments,
-            }) if let Some(test_assert) = self.as_assert_in_test(func)
-                && let Some(narrow_op) = test_assert.to_narrow_ops(self, &arguments.args) =>
-            {
-                self.ensure_expr(func, usage);
-                for arg in arguments.args.iter_mut() {
-                    self.ensure_expr(arg, &mut Usage::narrowing_from(usage));
-                }
-                for kw in arguments.keywords.iter_mut() {
-                    self.ensure_expr(&mut kw.value, usage);
-                }
-                self.bind_narrow_ops(&narrow_op, NarrowUseLocation::Span(*range), usage);
+                // Default: recurse into children as for any other expr.
+                x.recurse_mut(&mut |x| self.ensure_expr(x, usage));
             }
             Expr::Named(x) => {
                 // For scopes defined in terms of Definitions, we should normally already have the name in Static, but
@@ -973,16 +969,6 @@ impl<'a> BindingsBuilder<'a> {
                     });
                     this.scopes.pop();
                 });
-            }
-            Expr::Call(ExprCall { func, .. })
-                if matches!(
-                    self.as_special_export(func),
-                    Some(SpecialExport::Exit | SpecialExport::Quit | SpecialExport::OsExit)
-                ) =>
-            {
-                x.recurse_mut(&mut |x| self.ensure_expr(x, usage));
-                // Control flow doesn't proceed after sys.exit(), exit(), quit(), or os._exit().
-                self.scopes.mark_flow_termination(false);
             }
             Expr::Name(x) => {
                 let name = Ast::expr_name_identifier(x.clone());
