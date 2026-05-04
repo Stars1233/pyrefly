@@ -610,6 +610,28 @@ fn test_fine_grained_unrelated_export_no_recompute() {
     i.check(&["main"], &["foo"]);
 }
 
+/// Changing an export's type (not its existence) shouldn't invalidate
+/// consumers whose only edge on it is an `export_exists` check.
+///
+/// `bar`'s `from foo import Foo` calls `export_exists(foo, "Foo")`
+/// during binding. `main` only imports `value` from `bar`, so `bar`'s
+/// `Binding::Import(foo, Foo)` is never solved and no TypeEq dep on
+/// `foo::Foo` is recorded — leaving the `export_exists` call as the
+/// only edge. Foo's type changing should not invalidate bar.
+#[test]
+fn test_export_exists_is_existence_level() {
+    let mut i = Incremental::new();
+    i.set("foo", "Foo: int = 1");
+    i.set("bar", "from foo import Foo\nvalue: int = 42");
+    i.set("main", "from bar import value\nresult = value");
+    // `foo` is also requested so its TypeEq changes get diffed at
+    // Solutions level — otherwise the change-detection machinery
+    // never fires.
+    i.check(&["main", "foo"], &["main", "foo", "bar"]);
+
+    i.set("foo", "Foo: str = 'changed'");
+    i.check(&["foo"], &["foo"]);
+}
 /// Test fine-grained dependency tracking: changing the imported export SHOULD
 /// trigger recomputation.
 #[test]

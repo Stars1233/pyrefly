@@ -189,8 +189,6 @@ pub enum ModuleDep {
     // Depend on the TypeEq result of an exported key
     Key(AnyExportedKey),
     // Depend on the existence of an exported name, not necessarily it's type
-    // Currently unused, but we should use this in LookupExport
-    #[allow(unused)]
     NameExists(Name),
     // Depend on metadata (deprecation, docstring) of an exported name
     NameMetadata(Name),
@@ -2590,13 +2588,10 @@ impl Drop for TransactionHandle<'_> {
 
 impl<'a> LookupExport for TransactionHandle<'a> {
     fn export_exists(&self, module: ModuleName, name: &Name) -> bool {
-        // TODO: This should be ModuleDep::NameExists instead
-        // but tests fail.
-        let dep = ModuleDep::Key(AnyExportedKey::KeyExport(KeyExport(name.clone())));
         self.with_exports(
             module,
             |exports, lookup| exports.exports(lookup).contains_key(name),
-            dep,
+            ModuleDep::NameExists(name.clone()),
         )
         .unwrap_or(false)
     }
