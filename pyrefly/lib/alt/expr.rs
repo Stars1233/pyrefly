@@ -295,9 +295,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         hint: Option<HintRef>,
         errors: &ErrorCollector,
     ) -> TypeInfo {
-        if let Some(self_type_annotation) = self.intercept_typing_self_use(x) {
-            return self_type_annotation;
-        }
         let res = match x {
             Expr::Name(x) => {
                 if Ast::is_synthesized_empty_name(x) {
@@ -1978,17 +1975,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             _ => self.expr_infer_with_hint_promote(x, elt_hint, errors),
         })
-    }
-
-    fn intercept_typing_self_use(&self, x: &Expr) -> Option<TypeInfo> {
-        match x {
-            Expr::Name(..) | Expr::Attribute(..) => {
-                let key = Key::SelfTypeLiteral(x.range());
-                let self_type_form = self.get_hashed_opt(Hashed::new(&key))?;
-                Some(self_type_form.arc_clone())
-            }
-            _ => None,
-        }
     }
 
     fn is_enum_class_type(&self, ty: &Type) -> bool {

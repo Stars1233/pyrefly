@@ -17,26 +17,44 @@ These numbers are from a single sampled run, not a continuous benchmark. Re-run 
 
 ## Impact ranking (from `--report-demand-tree` on real-world files)
 
-1. **LookupExport during binding** (~67% of all demands) —
-   `is_special_export` alone is ~47% of all demands and ~70% of
-   `Exports` demands; per-file range 9-63% of all demands. ~95% of
-   dependency modules are at `Step::Exports` only — i.e., they were
-   never queried for an Answer key, so the only thing forcing them
-   into the demand graph was `LookupExport` calls during binding.
-   ~92% of those modules have `is_special_export` among their reasons.
-2. **MRO walk without early exit** (~32% of all demands across class
-   keys) — `KeyClassSynthesizedFields` is ~13% of all demands (39% of
-   Answer), `KeyClassMetadata` ~11% (34% of Answer), `KeyClassMro` ~5%
-   (14% of Answer), `KeyClassField` ~3% (10% of Answer). Worst for
-   files with deep class hierarchies.
-3. **Full function signature on import** — resolves 11 keys per imported
+Aggregated over 25 hot files from one large codebase. Answer-side
+demands account for the majority of cross-module work; most touched
+dependency modules stop at `Step::Load` without their export sets
+being materialized.
+
+1. **MRO walk without early exit** (~64% of all demands across class
+   keys) — `KeyClassSynthesizedFields` is ~24% of all demands (~36% of
+   Answer), `KeyClassMetadata` ~23% (~35% of Answer), `KeyClassMro` ~9%
+   (~13% of Answer), `KeyClassField` ~8% (~12% of Answer). Worst for
+   files with deep class hierarchies. (See "MRO computed even when
+   attribute is on the class itself" and "Multiple inheritance check
+   resolves unique parent fields" below.)
+2. **`is_special_export` during binding** (~21% of all demands; ~64%
+   of `Exports` demands; per-file range 2-48%, median ~28%) — the
+   dominant `LookupExport` reason. Fires for type-var classification
+   (`T = TypeVar(...)`, `P = ParamSpec(...)`, etc.) and other
+   special-form recognition during binding.
+3. **`module_exists` during binding** (~9% of all demands; ~26% of
+   `Exports` demands) — `import x.y` and the self-import submodule
+   fallback demand the target module's existence at bind time. The
+   bind phase needs to construct a `Binding::Module` only when the
+   submodule is reachable, so it has to know up front whether the
+   submodule resolves.
+4. **Full function signature on import** — resolves 11 keys per imported
    function regardless of usage.
-4. **Class metadata for annotation-only usage** — `is_typed_dict()` check
+5. **Class metadata for annotation-only usage** — `is_typed_dict()` check
    on every class-as-annotation.
-5. **Eagerly resolved builtins** — 150 KeyExport + cascading demands per
+6. **Eagerly resolved builtins** — 150 KeyExport + cascading demands per
    module. Fixed cost but adds up.
-6. **Multiple inheritance check resolves unique fields** — low volume but
+7. **Multiple inheritance check resolves unique fields** — low volume but
    real waste for wide hierarchies.
+
+Of the ~199k dependency modules touched across the 25 sampled files,
+~18% are forced to `Step::Exports` only; ~76% stop at `Step::Load`,
+~5% reach `Step::Answers`, and ~0% reach `Step::Solutions`. ~88% of
+the `Step::Exports` modules have `is_special_export` among their
+reasons, but only ~2% have it as their only reason — `module_exists`
+and `is_final` calls almost always co-occur on the same target.
 
 ## Eagerly resolved builtins
 
@@ -122,36 +140,52 @@ entries pointing to C:
 Also visible in `test_unused_import_from_same_module` and
 `test_transitive_import_annotated` where `c: Exports` appears.
 
-**Real-world impact:** Across a real-world sample,
-`Exports(is_special_export)` accounts for ~47% of all cross-module
-demands (median ~50% per file; range 9-63% depending on file shape).
-A single dependency module can be checked tens of thousands of times
-for special-export status during one binding pass. ~95% of dependency
-modules end at `Step::Exports` only — never queried for an Answer
-key — and ~92% of those have `is_special_export` as one of their
-reasons. See the Methodology section above for how this is computed.
+**Real-world impact:** `Exports(is_special_export)` accounts for ~21%
+of all cross-module demands (per-file range 2-48%, median ~28%) and
+~64% of `Exports` demands — the dominant `LookupExport` reason.
+~18% of dependency modules end at `Step::Exports` only; the
+remaining majority stop at `Step::Load` (file contents read, export
+set not materialized). See the Methodology section above for how this
+is computed.
 
 **Ideal behavior:** Module C should not be computed at all (`c: Nothing`)
 when A doesn't need it. B's bindings should be constructible without
 demanding exports from B's own imports.
 
-**Root cause:** 18 call sites in `bindings.rs`, `stmt.rs`, and `scope.rs`
-use `self.lookup.*` which goes through `TransactionHandle::with_exports`
-→ `lookup_export` → `demand(Step::Exports)`.
+**Root cause:** Bind-time call sites in `bindings.rs`, `stmt.rs`, and
+`scope.rs` use `self.lookup.*`, which goes through
+`TransactionHandle::with_exports` → `lookup_export` →
+`demand(Step::Exports)`. Each remaining call forces the target module's
+exports during binding.
 
-**Deferral strategies by call site:**
-- `module_exists` / `export_exists` — create optimistic `Binding::Import`,
-  validate at solve time (solver already does cascading check:
-  export → submodule → `__getattr__` → error)
-- `is_final` — move to solve time (emit error when solving the assignment)
-- `get_deprecated` — move to solve time (emit warning when solving the import)
-- `is_special_export` — hardest to defer; controls which `Binding` variant
-  is created (e.g., `Binding::TypeVar` vs `Binding::NameAssign`). Could use
-  syntactic name matching for the common case, with solve-time validation
-  for re-exports
-- `get_wildcard` — unavoidable at bind time (binder needs the set of names
-  to create binding table entries). But only affects `from X import *`
-- `module_exists` for builtins — fixed cost, unavoidable
+**Where calls still fire at bind time:**
+
+- `is_special_export` for `TypeVar` / `ParamSpec` / `TypeVarTuple` /
+  `NewType` / `NamedTuple` / `Final` / `ClassVar` / etc. — controls
+  which `Binding` variant is created. Could use syntactic name
+  matching for the common case with solve-time validation for
+  re-exports.
+- `module_exists` for `import x.y` and the self-import submodule
+  fallback — bind phase needs to know whether to emit `Binding::Module`
+  vs. an error binding.
+- `is_final` reassignment check — fires when a name imported from
+  another module is reassigned, to confirm the imported name is not
+  `Final`.
+- `get_wildcard` for `from X import *` — unavoidable; binder needs
+  the set of names to create binding table entries.
+- `module_exists` for builtins — unavoidable; fixed per-module cost.
+
+**Where calls already fire only at solve time** (so they don't force
+exports during binding):
+
+- `export_exists` for cross-module `from X import Y` — `Binding::Import`
+  carries an `ImportFallback`; solver does the
+  `export → submodule → __getattr__ → error` cascade.
+- `get_deprecated` for explicit `from X import Y` — deprecation warning
+  fires at solve time only when the imported name actually exports.
+- `is_special_export` for `typing.Self` — solve-time `untype_opt`
+  recognizes `Type::Type[SpecialForm(SelfType)]`; the bind side records
+  one `class_scopes` entry per class instead of one per use.
 
 ## Note on repeated demands to the same key
 
@@ -177,12 +211,13 @@ candidate attributes, even if the attribute is found on the first
 class. The code in attr.rs:651 does `for ancestor in mro.ancestors_no_object()`
 without early exit.
 
-**Real-world impact:** Across a real-world sample,
-`KeyClassSynthesizedFields` is ~13% of all demands (~39% of `Answer`
-demands) and `KeyClassMro` is ~5% (~14% of `Answer`) — both consequences
-of the full MRO walk. The class hierarchy keys collectively
+**Real-world impact:** The class hierarchy keys
 (`KeyClassSynthesizedFields` + `KeyClassMetadata` + `KeyClassMro` +
-`KeyClassField`) account for ~32% of all demands.
+`KeyClassField`) collectively account for ~64% of all cross-module
+demands — the largest cluster of work in a typical check.
+`KeyClassSynthesizedFields` alone is ~24% of all demands (~36% of
+`Answer` demands), and `KeyClassMro` is ~9% (~13% of `Answer`). Both
+are consequences of the full MRO walk.
 
 **Ideal behavior:** Check the class itself first. Only walk the MRO
 if the attribute is not found on the class itself.
@@ -233,21 +268,19 @@ This demonstrates that pyrefly already implements the "annotation as
 cascade breaker" pattern — callers trust the annotation without
 inferring the function body.
 
-## Transitive annotated exports break cascades (partially working)
+## Transitive annotated exports break cascades
 
 `test_transitive_import_annotated.md` shows that when `b` has
 `value: int = 42`, module `c` has no keys solved — the annotation
-`int` is resolved locally in `b` without cascading to `c`. However,
-`c` is still computed to Exports due to LookupExport calls during
-`b`'s binding (see "LookupExport during binding forces transitive
-exports" above). Ideally `c` would be `Nothing`.
+`int` is resolved locally in `b` without cascading to `c`. `c` reaches
+`Step::Load` only: the binder reads its file contents to discover the
+module exists, but the export set is never materialized. Ideally `c`
+would be `Nothing`.
 
-## Unused imports' transitive deps are not checked (partially working)
+## Unused imports' transitive deps are not checked
 
 `test_unused_import_from_same_module.md` shows that `c` (Heavy's
 module) has 0 solved keys when only `light()` is used from `b`.
 The solver only resolves the `light` function and doesn't cascade
-into `Heavy`'s module. However, `c` is still computed to Exports
-due to LookupExport calls during `b`'s binding (see "LookupExport
-during binding forces transitive exports" above). Ideally `c` would
-be `Nothing`.
+into `Heavy`'s module. `c` reaches `Step::Load` only — same gap as
+above.

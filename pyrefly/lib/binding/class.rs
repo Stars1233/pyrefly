@@ -390,6 +390,15 @@ impl<'a> BindingsBuilder<'a> {
             x.name.clone(),
             has_protocol_base,
         ));
+        // Record the class body range for solve-time `typing.Self` resolution.
+        // We use the body extent (first..last stmt) — not `x.range` — so
+        // bases, decorators, and type params (which are evaluated in the
+        // enclosing scope) fall outside this entry.
+        if let (Some(first), Some(last)) = (body.first(), body.last()) {
+            let body_range = first.range().cover(last.range());
+            self.class_scopes
+                .push((body_range, class_indices.class_idx));
+        }
         self.init_static_scope(&body, false);
         self.stmts(
             body,

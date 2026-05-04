@@ -633,10 +633,6 @@ impl<'a> BindingsBuilder<'a> {
     pub fn ensure_expr(&mut self, x: &mut Expr, usage: &mut Usage) {
         self.with_semantic_checker(|semantic, context| semantic.visit_expr(x, context));
 
-        // Track uses of `typing.Self` in class bodies so they can be properly bound
-        // to the current class during the solving phase.
-        self.track_potential_typing_self(x);
-
         match x {
             Expr::Attribute(attr) => {
                 self.check_private_attribute_usage(attr);
@@ -1048,7 +1044,6 @@ impl<'a> BindingsBuilder<'a> {
         in_string_literal: bool,
         usage: &mut Usage,
     ) {
-        self.track_potential_typing_self(x);
         fn as_forward_ref<'b>(
             literal: &'b ExprStringLiteral,
             in_string_literal: bool,
@@ -1213,34 +1208,6 @@ impl<'a> BindingsBuilder<'a> {
             _ => x.recurse_mut(&mut |x| {
                 self.ensure_type_impl(x, tparams_builder, in_string_literal, usage)
             }),
-        }
-    }
-
-    /// Whenever we see a use of `typing.Self` and we are inside a class body,
-    /// create a special binding that can be used to remap the special form to a proper
-    /// self type during answers solving.
-    ///
-    /// If we are in a class, creates a `SelfTypeLiteral` binding.
-    /// Otherwise, emits an error since `Self` is only valid within a class.
-    fn track_potential_typing_self(&mut self, x: &Expr) {
-        match self.as_special_export(x) {
-            Some(SpecialExport::SelfType) => {
-                if let Some((current_class_idx, _)) =
-                    self.scopes.enclosing_class_and_metadata_keys()
-                {
-                    self.insert_binding(
-                        Key::SelfTypeLiteral(x.range()),
-                        Binding::SelfTypeLiteral(current_class_idx, x.range()),
-                    );
-                } else {
-                    self.error(
-                        x.range(),
-                        ErrorInfo::Kind(ErrorKind::InvalidAnnotation),
-                        "`Self` must appear within a class".to_owned(),
-                    );
-                }
-            }
-            _ => {}
         }
     }
 

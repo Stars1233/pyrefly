@@ -1,14 +1,15 @@
-# export_exists check forces exports on transitive dep
+# export_exists check does not force exports on transitive dep
 
-`a` imports `value` from `b`. `b` does `from c import Foo` — during
-binding, this triggers `export_exists(c, "Foo")` and `module_exists(c)`
-to verify the import. `a` only uses `value`, not `Foo`.
+`a` imports `value` from `b`. `b` does `from c import Foo`. `a` only
+uses `value`, not `Foo`.
 
-**Superfluous:** `c` being computed to Exports. The `export_exists` and
-`module_exists` checks during `b`'s binding demand `Step::Exports` on
-`c`, even though `a` never uses `Foo`. Ideally, `from c import Foo`
-would create an optimistic `Binding::Import` without demanding `c`'s
-exports, deferring validation to solve time.
+`from c import Foo` emits a `Binding::Import` with an `ImportFallback`;
+existence is verified only at solve time, when the binding's value is
+demanded. Since `a` never references `Foo`, the demand never fires and
+`c`'s export set is never forced.
+
+`c` reaches only `Step::Load` — the binder reads its file contents to
+resolve the import target, but doesn't materialize its export set.
 
 This is the same pattern as `test_unused_import_from_same_module` but
 simplified: `b` imports from `c` but only exports an unrelated value.
@@ -42,7 +43,6 @@ c: Load
 
 (159 builtin demands hidden)
 a -> b::Load(module_exists)
-a -> b::Exports(is_special_export)
 a -> b::Exports(export_exists)
 a -> b::Exports(get_deprecated)
 a -> b::KeyExport(Name("value"))

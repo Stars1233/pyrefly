@@ -4,9 +4,11 @@ Calling `get_config()` which has return annotation `-> int`. The
 function body uses `Config` from module `c`, but callers should not
 need to resolve `c` since the return type is explicitly annotated.
 
-Only `a -> b::KeyExport("get_config")` appears — this is correct.
-Module `c` has 0 solved keys, confirming that the annotation breaks
-the cascade. No superfluous demands.
+Module `c` has 0 solved keys — the annotation breaks the Answer-level
+cascade as intended. `c` still reaches `Step::Exports` because
+`b`'s binding still demands `is_special_export(c, "Config")` to
+classify the name; that's a separate opportunity covered by
+`test_special_export_forces_exports`.
 
 ## Files
 
@@ -44,7 +46,6 @@ a -> b::Exports(export_exists)
 a -> b::Exports(get_deprecated)
 a -> b::KeyExport(Name("get_config"))
   b -> c::Load(module_exists)
-  b -> c::Exports(is_special_export)
   b -> c::Exports(is_special_export)
   b -> c::Exports(is_special_export)
 ```

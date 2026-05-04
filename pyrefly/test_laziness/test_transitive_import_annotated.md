@@ -4,9 +4,10 @@
 `b` imports `Inner` from `c`, but `value`'s type is determined by its
 annotation, not by inference.
 
-Only `a -> b::KeyExport("value")` appears. Module `c` has 0 solved
-keys — the annotation `int` is resolved locally in `b` without
-cascading. No superfluous demands.
+Module `c` reaches `Step::Load` — its file contents are read to
+resolve the import target, but no keys are solved. The annotation
+`int` on `value` is resolved locally in `b` without cascading into
+`c`'s export set.
 
 ## Files
 
@@ -37,7 +38,6 @@ c: Load
 
 (164 builtin demands hidden)
 a -> b::Load(module_exists)
-a -> b::Exports(is_special_export)
 a -> b::Exports(export_exists)
 a -> b::Exports(get_deprecated)
 a -> b::KeyExport(Name("value"))

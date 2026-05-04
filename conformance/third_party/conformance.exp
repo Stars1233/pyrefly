@@ -6352,10 +6352,10 @@
     {
       "code": -2,
       "column": 26,
-      "concise_description": "`type[Self@Container]` is not subscriptable",
-      "description": "`type[Self@Container]` is not subscriptable",
+      "concise_description": "`Self` may not be subscripted",
+      "description": "`Self` may not be subscripted",
       "line": 68,
-      "name": "unsupported-operation",
+      "name": "invalid-annotation",
       "severity": "error",
       "stop_column": 35,
       "stop_line": 68
@@ -12497,17 +12497,6 @@
       "severity": "error",
       "stop_column": 19,
       "stop_line": 69
-    },
-    {
-      "code": -2,
-      "column": 18,
-      "concise_description": "`Self` must appear within a class",
-      "description": "`Self` must appear within a class",
-      "line": 70,
-      "name": "invalid-annotation",
-      "severity": "error",
-      "stop_column": 22,
-      "stop_line": 70
     },
     {
       "code": -2,

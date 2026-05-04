@@ -3,14 +3,11 @@
 `a` imports only `light` from `b`, which also exports `heavy`.
 `heavy`'s return type references `Heavy` from `c`.
 
-Only `a -> b::KeyExport("light")` appears. Module `c` has 0 solved
-keys — `heavy`'s signature is not resolved because it's not demanded.
-
-No superfluous demands in the demand tree. However, `b`'s solved keys
-show that `heavy`'s function chain IS partially resolved internally
-(KeyDecoratedFunction, KeyUndecoratedFunction for `heavy`) even though
-no one imports it. This happens because step_solutions for `b` resolves
-all exported keys, not just the demanded one.
+Module `c` reaches `Step::Load` — its file contents are read to
+resolve the import target, but no keys are solved. `heavy`'s
+signature is never resolved because nobody demands it: the only
+Answer-level demand into `b` is `KeyExport("light")`, and `light`'s
+return is annotated `int`, so the chain stops there.
 
 ## Files
 
@@ -38,7 +35,7 @@ class Heavy:
 ```expected
 a: Solutions
 b: Answers
-c: Exports
+c: Load
 
 (160 builtin demands hidden)
 a -> b::Load(module_exists)
@@ -47,5 +44,4 @@ a -> b::Exports(export_exists)
 a -> b::Exports(get_deprecated)
 a -> b::KeyExport(Name("light"))
   b -> c::Load(module_exists)
-  b -> c::Exports(is_special_export)
 ```

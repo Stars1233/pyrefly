@@ -39,12 +39,10 @@ c: Answers
 
 (168 builtin demands hidden)
 a -> b::Load(module_exists)
-a -> b::Exports(is_special_export)
 a -> b::Exports(export_exists)
 a -> b::Exports(get_deprecated)
 a -> b::KeyExport(Name("value"))
   b -> c::Load(module_exists)
-  b -> c::Exports(is_special_export)
   b -> c::Exports(is_special_export)
   b -> c::Exports(is_special_export)
   b -> c::Exports(export_exists)

@@ -431,7 +431,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 if let Some(ty) = &mut ann.ty
                     && ty.any(|t| matches!(t, Type::SpecialForm(SpecialForm::SelfType)))
                 {
-                    // The binding phase reports invalid uses of `Self` (for example, outside a class).
+                    // `untype_self` reports invalid uses of `Self` (for example, outside a class).
                     // Replace any unresolved `Self` special forms with `Any` so they do not leak into
                     // later phases as internal errors.
                     ty.subst_self_special_form_mut(&self.heap.mk_any_error());
@@ -3935,49 +3935,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         ty.clone()
     }
 
-    /// Handle `Binding::SelfTypeLiteral` - create Self type for class.
-    /// The `#[inline(never)]` annotation is intentional to reduce stack frame size.
-    #[inline(never)]
-    fn binding_to_type_self_type_literal(
-        &self,
-        class_key: Idx<KeyClass>,
-        r: TextRange,
-        errors: &ErrorCollector,
-    ) -> Type {
-        if let Some(cls) = &self.get_idx(class_key).as_ref().0 {
-            let metadata = self.get_metadata_for_class(cls);
-            if metadata.is_metaclass() {
-                self.error(
-                    errors,
-                    r,
-                    ErrorInfo::Kind(ErrorKind::InvalidAnnotation),
-                    "`Self` cannot be used in a metaclass".to_owned(),
-                );
-            }
-            match self.instantiate(cls) {
-                Type::ClassType(class_type) => {
-                    self.heap.mk_type_of(self.heap.mk_self_type(class_type))
-                }
-                ty => self.error(
-                    errors,
-                    r,
-                    ErrorInfo::Kind(ErrorKind::InvalidSelfType),
-                    format!(
-                        "Cannot apply `typing.Self` to non-class-instance type `{}`",
-                        self.for_display(ty)
-                    ),
-                ),
-            }
-        } else {
-            self.error(
-                errors,
-                r,
-                ErrorInfo::Kind(ErrorKind::InvalidSelfType),
-                "Could not resolve the class for `typing.Self` (may indicate unexpected recursion resolving types)".to_owned(),
-            )
-        }
-    }
-
     /// Handle `Binding::ClassBodyUnknownName` - resolve unknown name in class body.
     /// The `#[inline(never)]` annotation is intentional to reduce stack frame size.
     #[inline(never)]
@@ -5006,9 +4963,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // are handled in `binding_to_type_info`
                 self.binding_to_type_info(binding, errors).into_ty()
             }
-            Binding::SelfTypeLiteral(class_key, r) => {
-                self.binding_to_type_self_type_literal(*class_key, *r, errors)
-            }
             Binding::ClassBodyUnknownName(x) => {
                 self.binding_to_type_class_body_unknown_name(x.0, &x.1, &x.2, errors)
             }
@@ -5458,6 +5412,57 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
+    /// Untype a `typing.Self` special form by substituting the concrete
+    /// `Type::SelfType` for the enclosing class. Called from
+    /// `untype_opt`'s `Type::Type[SpecialForm(SelfType)]` arm. The
+    /// enclosing class is recovered from the bind-time `class_scopes`
+    /// side table on `Bindings`.
+    fn untype_self(&self, range: TextRange, errors: &ErrorCollector) -> Type {
+        let Some(class_idx) = self.bindings().enclosing_class(range) else {
+            self.error(
+                errors,
+                range,
+                ErrorInfo::Kind(ErrorKind::InvalidAnnotation),
+                "`Self` must appear within a class".to_owned(),
+            );
+            // Pass the unsubstituted `SpecialForm(SelfType)` through so
+            // downstream type-form checks (e.g. base class parsing,
+            // which rejects `class C(Self): ...` with `Invalid base
+            // class: Self`) still see the unresolved form and can
+            // emit their own diagnostics. `solve_annotation` has a
+            // fallback that replaces any lingering
+            // `SpecialForm(SelfType)` with `Any(Error)` before the
+            // type leaks into later phases.
+            return Type::SpecialForm(SpecialForm::SelfType);
+        };
+        let class = self.get_idx(class_idx);
+        let Some(cls) = &class.as_ref().0 else {
+            // The class binding was solved but produced no class
+            // object — this happens when Self resolution recurses into
+            // a class still mid-resolution.
+            return self.error(
+                errors,
+                range,
+                ErrorInfo::Kind(ErrorKind::InvalidSelfType),
+                "Could not resolve the class for `typing.Self` (may indicate unexpected recursion resolving types)".to_owned(),
+            );
+        };
+        let metadata = self.get_metadata_for_class(cls);
+        if metadata.is_metaclass() {
+            self.error(
+                errors,
+                range,
+                ErrorInfo::Kind(ErrorKind::InvalidAnnotation),
+                "`Self` cannot be used in a metaclass".to_owned(),
+            );
+        }
+        // `as_class_type_unchecked` matches what `solve_annotation` uses
+        // for annotation-time Self substitution and avoids the cycle that
+        // `instantiate(cls)` can hit when this fires while solving the
+        // same class's own annotations.
+        Type::SelfType(self.as_class_type_unchecked(cls))
+    }
+
     pub fn untype_opt(
         &self,
         mut ty: Type,
@@ -5511,6 +5516,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // Bare TypeForm (no subscript) is equivalent to TypeForm[Any]
                 if let Type::SpecialForm(SpecialForm::TypeForm) = t.as_ref() {
                     return Some(Type::TypeForm(Box::new(Type::Any(AnyStyle::Implicit))));
+                }
+                // `typing.Self` substitutes to the concrete `SelfType` of
+                // the enclosing class, recovered from the bind-time
+                // `class_scopes` side table on `Bindings`.
+                if let Type::SpecialForm(SpecialForm::SelfType) = t.as_ref() {
+                    return Some(self.untype_self(range, errors));
                 }
                 Some(*t)
             }

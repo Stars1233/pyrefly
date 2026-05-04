@@ -873,8 +873,6 @@ pub enum Key {
     UsageLink(TextRange),
     /// A yield link - a placeholder used for first-usage type inference specifically for yield expressions.
     YieldLink(TextRange),
-    /// A use of `typing.Self` in an expression. Used to redirect to the appropriate type (which is aware of the current class).
-    SelfTypeLiteral(TextRange),
     /// I am the type of a name that may involve a legacy type param (this may involve attribute narrows
     /// of a module in the case of imported names like `foo.T`).
     ///
@@ -919,7 +917,6 @@ impl Ranged for Key {
             Self::UsageLink(r) => *r,
             Self::YieldLink(r) => *r,
             Self::Delete(r) => *r,
-            Self::SelfTypeLiteral(r) => *r,
             Self::PossibleLegacyTParam(r) => *r,
             Self::PatternNarrow(r) => *r,
             Self::Exhaustive(_, r) => *r,
@@ -960,7 +957,6 @@ impl DisplayWith<ModuleInfo> for Key {
             Self::UsageLink(r) => write!(f, "Key::UsageLink({})", ctx.display(r)),
             Self::YieldLink(r) => write!(f, "Key::YieldLink({})", ctx.display(r)),
             Self::Delete(r) => write!(f, "Key::Delete({})", ctx.display(r)),
-            Self::SelfTypeLiteral(r) => write!(f, "Key::SelfTypeLiteral({})", ctx.display(r)),
             Self::PossibleLegacyTParam(r) => {
                 write!(f, "Key::PossibleLegacyTParam({})", ctx.display(r))
             }
@@ -2225,11 +2221,6 @@ pub enum Binding {
     /// example, forcing a `BindingExpect` to be solved) in the context of first-usage-based
     /// inference of partial types.
     UsageLink(LinkedKey),
-    /// Inside of a class body, we check whether an expression resolves to the `SelfType` special
-    /// export. If so, we create a `SelfTypeLiteral` key/binding pair so that the AnswersSolver can
-    /// later synthesize the correct `Type::SelfType` (this binding is needed
-    /// because we need access to the current class to do so).
-    SelfTypeLiteral(Idx<KeyClass>, TextRange),
     /// `del` statement
     Delete(Box<Expr>),
     /// A name in the class body that wasn't found in the static scope
@@ -2492,14 +2483,6 @@ impl DisplayWith<Bindings> for Binding {
                 }
                 write!(f, ")")
             }
-            Self::SelfTypeLiteral(class_key, r) => {
-                write!(
-                    f,
-                    "SelfTypeLiteral({}, {})",
-                    m.display(ctx.idx_to_key(*class_key)),
-                    m.display(r)
-                )
-            }
             Self::Delete(x) => write!(f, "Delete({})", m.display(x)),
             Self::ClassBodyUnknownName(x) => {
                 let (class_key, name, suggestion) = x.as_ref();
@@ -2610,7 +2593,6 @@ impl Binding {
             | Binding::SuperInstance(_)
             | Binding::AssignToAttribute(_)
             | Binding::UsageLink(_)
-            | Binding::SelfTypeLiteral(..)
             | Binding::AssignToSubscript(_)
             | Binding::Delete(_)
             | Binding::ClassBodyUnknownName(_)

@@ -196,6 +196,13 @@ struct BindingsInner {
     /// keyed by the lambda's TextRange. Populated at binding time so the
     /// solver can look up yield info without re-walking the AST.
     lambda_yield_keys: Vec<(TextRange, Box<[Idx<KeyYield>]>, Box<[Idx<KeyYieldFrom>]>)>,
+    /// Class body ranges paired with class indices. Used by the solver to
+    /// recover the enclosing class for an expression that resolves to
+    /// `typing.Self`, without needing a per-`Self`-use bind-time key.
+    /// Populated in source order (parent class bodies before nested ones),
+    /// so a reverse iteration with "first containing range" yields the
+    /// innermost enclosing class.
+    class_scopes: Vec<(TextRange, Idx<KeyClass>)>,
     /// Annotation-only declarations (`x: Final[int]`) that are subsequently
     /// initialized by an assignment that cannot be syntactically merged with
     /// the annotation (tuple unpacking, walrus operator, `with … as`).
@@ -273,6 +280,11 @@ pub struct BindingsBuilder<'a> {
     /// Yield and yield-from indices for lambdas that contain yields.
     lambda_yield_keys: Vec<(TextRange, Box<[Idx<KeyYield>]>, Box<[Idx<KeyYieldFrom>]>)>,
     next_lambda_param_id: u32,
+    /// Class body ranges paired with class indices, populated as
+    /// `class_def_inner` enters each class body. The solver uses this to
+    /// recover the enclosing class for a given expression range without
+    /// needing a per-`Self`-use bind-time key.
+    pub class_scopes: Vec<(TextRange, Idx<KeyClass>)>,
     /// See `BindingsInner::subsequently_initialized`.
     subsequently_initialized: SmallSet<Idx<KeyAnnotation>>,
     /// Defaults extracted from an adjacent `__new__.__defaults__` assignment,
@@ -328,6 +340,7 @@ impl Bindings {
             unused_imports: Vec::new(),
             unused_variables: Vec::new(),
             lambda_yield_keys: Vec::new(),
+            class_scopes: Vec::new(),
             subsequently_initialized: SmallSet::new(),
             promote_ranges: SmallSet::new(),
         }))
@@ -375,6 +388,21 @@ impl Bindings {
             .iter()
             .find(|(r, _, _)| *r == range)
             .map_or((&[], &[]), |(_, yields, yield_froms)| (yields, yield_froms))
+    }
+
+    /// Returns the innermost class whose body range contains `range`, or
+    /// `None` if `range` is not inside any class body. Used by the solver
+    /// to anchor `typing.Self` references to the enclosing class.
+    ///
+    /// `class_scopes` is populated in source/visit order, so reverse
+    /// iteration yields the most-recently-pushed (innermost) class first.
+    pub fn enclosing_class(&self, range: TextRange) -> Option<Idx<KeyClass>> {
+        self.0
+            .class_scopes
+            .iter()
+            .rev()
+            .find(|(r, _)| r.contains_range(range))
+            .map(|(_, idx)| *idx)
     }
 
     /// Returns `true` if the given annotation-only declaration was subsequently
@@ -553,6 +581,7 @@ impl Bindings {
             deferred_bound_names: Vec::new(),
             lambda_yield_keys: Vec::new(),
             next_lambda_param_id: 0,
+            class_scopes: Vec::new(),
             subsequently_initialized: SmallSet::new(),
             adjacent_namedtuple_defaults: None,
             promote_ranges: SmallSet::new(),
@@ -663,6 +692,7 @@ impl Bindings {
             unused_imports: builder.unused_imports,
             unused_variables: builder.unused_variables,
             lambda_yield_keys: builder.lambda_yield_keys,
+            class_scopes: builder.class_scopes,
             subsequently_initialized: builder.subsequently_initialized,
             promote_ranges: builder.promote_ranges,
         }))
