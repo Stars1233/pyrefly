@@ -23,7 +23,6 @@
 #![deny(clippy::str_to_string)]
 #![deny(clippy::trivially_copy_pass_by_ref)]
 #![feature(const_type_name)]
-#![feature(if_let_guard)]
 
 //! Utility functions that are not specific to the things Pyre does.
 
