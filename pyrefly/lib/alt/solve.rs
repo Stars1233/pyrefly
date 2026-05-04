@@ -93,6 +93,7 @@ use crate::binding::binding::EmptyAnswer;
 use crate::binding::binding::ExprOrBinding;
 use crate::binding::binding::FirstUse;
 use crate::binding::binding::FunctionParameter;
+use crate::binding::binding::ImportBinding;
 use crate::binding::binding::IsAsync;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
@@ -4155,7 +4156,22 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         result
     }
 
-    /// Handle `Binding::Module` - create module type.
+    /// Resolve a `Binding::Import`, emitting a deprecation warning if the
+    /// imported name is marked deprecated. `check_deprecated` is set only
+    /// for user-written explicit `from X import Y`; implicit bindings
+    /// (builtins wildcard, legacy typing aliases, `from X import *`) skip
+    /// the check so no new warnings appear for symbols the user never named.
+    fn solve_import(&self, x: &ImportBinding, errors: &ErrorCollector) -> Type {
+        if let Some(range) = x.check_deprecated
+            && let Some(deprecation) = self.exports.get_deprecated(x.module, &x.name)
+        {
+            let msg = deprecation.as_error_message(format!("`{}` is deprecated", x.name));
+            errors.add(range, ErrorInfo::Kind(ErrorKind::Deprecated), msg);
+        }
+        self.get_from_export(x.module, None, &KeyExport(x.name.clone()))
+            .arc_clone()
+    }
+
     /// The `#[inline(never)]` annotation is intentional to reduce stack frame size.
     #[inline(never)]
     fn binding_to_type_module(&self, m: ModuleName, path: &[Name], prev: Option<Idx<Key>>) -> Type {
@@ -5028,9 +5044,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 let def = self.get_decorated_function(idx);
                 self.solve_function_binding(def, &mut pred, class_meta.as_ref(), errors)
             }
-            Binding::Import(x) => self
-                .get_from_export(x.module, None, &KeyExport(x.name.clone()))
-                .arc_clone(),
+            Binding::Import(x) => self.solve_import(x, errors),
             Binding::ImportViaGetattr(x) => {
                 // Import via module-level __getattr__ for incomplete stubs.
                 // Get the return type of __getattr__.

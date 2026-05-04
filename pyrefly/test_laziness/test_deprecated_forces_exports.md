@@ -1,16 +1,19 @@
-# get_deprecated forces exports on transitive dep
+# get_deprecated no longer forces exports on transitive dep
 
-`a` imports `value` from `b`. `b` imports `old_func` from `c` with a
-deprecation marker. `a` only uses `value`, not `old_func`.
+`a` imports `value` from `b`. `b` imports `old_func` from `c`. `a` only
+uses `value`, not `old_func`.
 
-**Superfluous:** `c` being computed to Exports. During `b`'s binding,
-`from c import old_func` triggers `get_deprecated(c, "old_func")` which
-demands `Step::Exports` on `c`, even though `a` never uses `old_func`.
+Deprecation warning emission for imported names was moved from the
+binding phase to solve time (see the `Binding::Import` arm of
+`solve_binding`). The binding phase no longer demands
+`get_deprecated(c, "old_func")` just to potentially warn at the
+`from c import ...` site. The warning will fire at solve time only if
+`b`'s `old_func` import is actually resolved — which it is not here,
+because `a` never references `old_func` (directly or transitively).
 
-Note: This test may be hard to trigger since deprecation requires `c` to
-actually mark `old_func` as deprecated via `warnings.deprecated` or
-similar. The `get_deprecated` call happens regardless of whether the name
-is actually deprecated — the check itself forces exports.
+`c` remains at Exports because `b`'s binding phase still demands
+`module_exists(c)` and `export_exists(c, "old_func")`. Those calls are
+targeted by later commits in this stack.
 
 ## Files
 
@@ -41,10 +44,9 @@ c: Exports
 (159 builtin demands hidden)
 a -> b::Load(module_exists)
 a -> b::Exports(export_exists)
-a -> b::Exports(get_deprecated)
 a -> b::Exports(is_special_export)
+a -> b::Exports(get_deprecated)
 a -> b::KeyExport(Name("value"))
   b -> c::Load(module_exists)
   b -> c::Exports(export_exists)
-  b -> c::Exports(get_deprecated)
 ```

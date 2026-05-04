@@ -1079,6 +1079,7 @@ impl<'a> BindingsBuilder<'a> {
                             module: builtins_module,
                             name: name.clone(),
                             original_name_range: None,
+                            check_deprecated: None,
                         })),
                     );
                     self.bind_name(name, idx, FlowStyle::Import(builtins_module, name.clone()));

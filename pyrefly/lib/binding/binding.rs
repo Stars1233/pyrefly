@@ -2059,6 +2059,13 @@ pub struct ImportBinding {
     /// `from foo import bar as baz`, this is the range of `bar`. `None`
     /// for non-renamed imports.
     pub original_name_range: Option<TextRange>,
+    /// `Some(range)` for user-written explicit `from X import Y` forms,
+    /// where a deprecation warning should fire at solve time, attached
+    /// to `range`. `None` for implicit synthetic imports (builtins
+    /// wildcard injection, `typing.List` → `builtins.list` legacy
+    /// aliases, and `from X import *` wildcards) where emitting
+    /// per-name deprecation would be noise.
+    pub check_deprecated: Option<TextRange>,
 }
 
 #[derive(Clone, Debug)]
@@ -2303,8 +2310,8 @@ impl DisplayWith<Bindings> for Binding {
             Self::Import(x) => {
                 write!(
                     f,
-                    "Import({}, {}, {:?})",
-                    x.module, x.name, x.original_name_range
+                    "Import({}, {}, {:?}, check_dep={:?})",
+                    x.module, x.name, x.original_name_range, x.check_deprecated
                 )
             }
             Self::ImportViaGetattr(x) => {
