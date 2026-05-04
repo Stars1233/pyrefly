@@ -138,9 +138,9 @@ fn create_intermediate_definition_from(
             Binding::Import(x) => {
                 return Some(IntermediateDefinition::NamedImport(
                     def_key.range(),
-                    x.0,
-                    x.1.clone(),
-                    x.2,
+                    x.module,
+                    x.name.clone(),
+                    x.original_name_range,
                 ));
             }
             Binding::ImportViaGetattr(x) => {

@@ -58,6 +58,7 @@ use crate::binding::binding::BindingLegacyTypeParam;
 use crate::binding::binding::BranchInfo;
 use crate::binding::binding::FirstUse;
 use crate::binding::binding::FunctionParameter;
+use crate::binding::binding::ImportBinding;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
 use crate::binding::binding::KeyClass;
@@ -1074,7 +1075,11 @@ impl<'a> BindingsBuilder<'a> {
                     let key = Key::Import(Box::new((name.clone(), TextRange::default())));
                     let idx = self.table.insert(
                         key,
-                        Binding::Import(Box::new((builtins_module, name.clone(), None))),
+                        Binding::Import(Box::new(ImportBinding {
+                            module: builtins_module,
+                            name: name.clone(),
+                            original_name_range: None,
+                        })),
                     );
                     self.bind_name(name, idx, FlowStyle::Import(builtins_module, name.clone()));
                 }
@@ -1175,7 +1180,7 @@ impl<'a> BindingsBuilder<'a> {
                     return self.as_special_export_inner(&x.expr, visited_names, visited_keys);
                 }
                 Binding::Import(x) => {
-                    return self.lookup.is_special_export(x.0, &x.1);
+                    return self.lookup.is_special_export(x.module, &x.name);
                 }
                 Binding::Phi(_, branches) => {
                     // Check all branches for a consistent special export (e.g. try/except
@@ -1644,12 +1649,12 @@ impl<'a> BindingsBuilder<'a> {
         let prev_idx = self.scopes.current_flow_idx(name);
         if let Some(prev_idx) = prev_idx
             && let Some(Binding::Import(prev)) = self.idx_to_binding(prev_idx)
-            && self.lookup.is_final(prev.0, &prev.1)
+            && self.lookup.is_final(prev.module, &prev.name)
         {
             // A duplicate import of the same symbol is not a reassignment.
             if let Some(Binding::Import(cur)) = self.idx_to_binding(idx)
-                && cur.0 == prev.0
-                && cur.1 == prev.1
+                && cur.module == prev.module
+                && cur.name == prev.name
             {
                 return;
             }

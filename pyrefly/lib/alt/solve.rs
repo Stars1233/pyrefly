@@ -5029,7 +5029,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.solve_function_binding(def, &mut pred, class_meta.as_ref(), errors)
             }
             Binding::Import(x) => self
-                .get_from_export(x.0, None, &KeyExport(x.1.clone()))
+                .get_from_export(x.module, None, &KeyExport(x.name.clone()))
                 .arc_clone(),
             Binding::ImportViaGetattr(x) => {
                 // Import via module-level __getattr__ for incomplete stubs.

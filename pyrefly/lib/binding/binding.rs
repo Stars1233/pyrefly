@@ -2047,6 +2047,20 @@ pub struct ExhaustiveBinding {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct LambdaParamId(pub u32);
 
+/// Data for `Binding::Import`. Carries the `(module, name)` of an imported
+/// symbol, plus metadata for downstream consumers.
+#[derive(Clone, Debug)]
+pub struct ImportBinding {
+    /// The module being imported from.
+    pub module: ModuleName,
+    /// The name being imported.
+    pub name: Name,
+    /// The original name's location for renamed imports. For example, in
+    /// `from foo import bar as baz`, this is the range of `bar`. `None`
+    /// for non-renamed imports.
+    pub original_name_range: Option<TextRange>,
+}
+
 #[derive(Clone, Debug)]
 pub enum Binding {
     /// An expression, optionally with a Key saying what the type must be.
@@ -2115,10 +2129,8 @@ pub enum Binding {
         Option<Idx<Key>>,
         Option<Idx<KeyClassMetadata>>,
     ),
-    /// An import statement, typically with Self::Import.
-    /// The option range tracks the original name's location for renamed import.
-    /// e.g. in `from foo import bar as baz`, we should track the range of `bar`.
-    Import(Box<(ModuleName, Name, Option<TextRange>)>),
+    /// An import statement, typically with `Self::Import`.
+    Import(Box<ImportBinding>),
     /// An import via module-level __getattr__ for incomplete stubs.
     /// See: https://typing.python.org/en/latest/guides/writing_stubs.html#incomplete-stubs
     ImportViaGetattr(Box<(ModuleName, Name)>),
@@ -2289,8 +2301,11 @@ impl DisplayWith<Bindings> for Binding {
             }
             Self::Function(x, _pred, _class) => write!(f, "Function({})", ctx.display(*x)),
             Self::Import(x) => {
-                let (m, n, original_name) = x.as_ref();
-                write!(f, "Import({m}, {n}, {original_name:?})")
+                write!(
+                    f,
+                    "Import({}, {}, {:?})",
+                    x.module, x.name, x.original_name_range
+                )
             }
             Self::ImportViaGetattr(x) => {
                 let (m, n) = x.as_ref();

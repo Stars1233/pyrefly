@@ -40,6 +40,7 @@ use crate::binding::binding::BindingTypeAlias;
 use crate::binding::binding::ExhaustiveBinding;
 use crate::binding::binding::ExhaustivenessKind;
 use crate::binding::binding::ExprOrBinding;
+use crate::binding::binding::ImportBinding;
 use crate::binding::binding::IsAsync;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
@@ -546,7 +547,11 @@ impl<'a> BindingsBuilder<'a> {
                 //
                 // For example, we treat `typing.List` as if it were an import of `builtins.list`.
                 self.bind_legacy_type_var_or_typing_alias(name, |_| {
-                    Binding::Import(Box::new((module, forward, None)))
+                    Binding::Import(Box::new(ImportBinding {
+                        module,
+                        name: forward,
+                        original_name_range: None,
+                    }))
                 })
             }
             Stmt::Assign(mut x) => {
@@ -1413,7 +1418,11 @@ impl<'a> BindingsBuilder<'a> {
                 for name in wildcards.iter_hashed() {
                     let key = Key::Import(Box::new((name.into_key().clone(), x.range)));
                     let val = if self.lookup.export_exists(m, &name) {
-                        Binding::Import(Box::new((m, name.into_key().clone(), None)))
+                        Binding::Import(Box::new(ImportBinding {
+                            module: m,
+                            name: name.into_key().clone(),
+                            original_name_range: None,
+                        }))
                     } else {
                         if !self.scopes.is_unreachable_from_static_test() {
                             self.error(
@@ -1463,7 +1472,11 @@ impl<'a> BindingsBuilder<'a> {
                             deprecated.as_error_message(format!("`{}` is deprecated", x.name));
                         self.error_multiline(x.range, ErrorInfo::Kind(ErrorKind::Deprecated), msg);
                     }
-                    Binding::Import(Box::new((m, x.name.id.clone(), original_name_range)))
+                    Binding::Import(Box::new(ImportBinding {
+                        module: m,
+                        name: x.name.id.clone(),
+                        original_name_range,
+                    }))
                 } else {
                     // Try submodule lookup first, then fall back to __getattr__
                     let x_as_module_name = m.append(&x.name.id);
