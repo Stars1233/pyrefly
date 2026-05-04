@@ -11,6 +11,7 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::BufWriter;
@@ -41,6 +42,9 @@ use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_python::sys_info::SysInfo;
 use pyrefly_types::type_alias::TypeAliasIndex;
 use pyrefly_util::arc_id::ArcId;
+use pyrefly_util::demand_tree::DemandCollector;
+use pyrefly_util::demand_tree::DemandEdge;
+use pyrefly_util::demand_tree::DemandSpan;
 use pyrefly_util::events::CategorizedEvents;
 use pyrefly_util::fs_anyhow;
 use pyrefly_util::lock::Mutex;
@@ -409,6 +413,31 @@ impl ModuleDeps {
     }
 }
 
+impl ModuleDep {
+    /// Short, stable label identifying this demand for the demand-tree
+    /// output (`pyrefly check --report-demand-tree`). One label per
+    /// variant — derived structurally so adding a new variant requires
+    /// deciding the label here, with no risk of the label drifting
+    /// from the structural dependency.
+    fn demand_label(&self) -> &'static str {
+        match self {
+            ModuleDep::Exists => "module_exists",
+            ModuleDep::Key(_) => "key",
+            ModuleDep::NameExists(_) => "export_exists",
+            ModuleDep::NameMetadata(_) => "name_metadata",
+            ModuleDep::IsSpecialExport(_) => "is_special_export",
+            ModuleDep::IsReexport(_) => "is_reexport",
+            ModuleDep::GetDeprecated(_) => "get_deprecated",
+            ModuleDep::IsFinal(_) => "is_final",
+            ModuleDep::DocstringRange(_) => "docstring_range",
+            ModuleDep::IsSubmoduleImportedImplicitly(_) => "is_submodule_imported_implicitly",
+            ModuleDep::Wildcard => "get_wildcard",
+            ModuleDep::EveryExportUntracked => "get_every_export_untracked",
+            ModuleDep::Class(_) => "class",
+        }
+    }
+}
+
 /// `ModuleData` is a snapshot of `ArcId<ModuleDataMut>` in the main state.
 /// The snapshot is readonly most of the times. It will only be overwritten with updated information
 /// from `Transaction` when we decide to commit a `Transaction` into the main state.
@@ -630,6 +659,7 @@ impl<'a> TransactionData<'a> {
                 sub_task_telemetry: None,
                 readable,
                 timing: Default::default(),
+                demand_collector: None,
             })
         } else {
             Err(state_lock_blocked)
@@ -649,6 +679,10 @@ pub struct Transaction<'a> {
     readable: RwLockReadGuard<'a, StateData>,
     /// Atomic nanosecond counters accumulated across worker threads during a transaction.
     timing: TransactionTimingCounters,
+    /// Optional demand-tree collector for this run. Set via
+    /// [`Transaction::set_demand_collector`] before `run`; read by
+    /// `TransactionHandle` event sites.
+    demand_collector: Option<DemandCollector>,
 }
 
 impl<'a> Transaction<'a> {
@@ -660,6 +694,7 @@ impl<'a> Transaction<'a> {
             sub_task_telemetry: _,
             readable,
             timing,
+            demand_collector: _,
         } = self;
         drop(readable);
         let mut stats = stats.into_inner();
@@ -675,6 +710,55 @@ impl<'a> Transaction<'a> {
 
     pub fn set_subscriber(&mut self, subscriber: Option<Box<dyn Subscriber>>) {
         self.data.subscriber = subscriber;
+    }
+
+    /// Install a demand-tree collector for this transaction. Pass `None` to
+    /// disable collection. Collected events come from `TransactionHandle`
+    /// event sites; call [`Transaction::take_demand_roots`] after `run` to
+    /// harvest the tree.
+    pub fn set_demand_collector(&mut self, collector: Option<DemandCollector>) {
+        self.demand_collector = collector;
+    }
+
+    /// Take the demand-tree roots collected during this run. Returns an
+    /// empty vec if no collector was installed.
+    pub fn take_demand_roots(&self) -> Vec<DemandEdge> {
+        self.demand_collector
+            .as_ref()
+            .map(|c| c.take_roots())
+            .unwrap_or_default()
+    }
+
+    /// Record a leaf `Exports`-event in the demand tree, if a collector
+    /// is installed. No-op otherwise. Callers obtain the label via
+    /// [`ModuleDep::demand_label`] before moving the dep into
+    /// [`Self::get_module`], so the demand-tree label can't drift from
+    /// the dependency that triggered it.
+    fn record_demand_exports_event(
+        &self,
+        from: impl Display,
+        target: impl Display,
+        label: &'static str,
+    ) {
+        if let Some(c) = self.demand_collector.as_ref() {
+            c.exports_event(from, target, label);
+        }
+    }
+
+    /// Open a demand-tree span for an in-flight `Answer` lookup, if a
+    /// collector is installed. The returned guard (if any) must be held
+    /// for the duration of the lookup so the per-thread nesting stack
+    /// stays balanced.
+    #[must_use = "demand span is closed when the guard is dropped; hold it for the duration of the lookup"]
+    fn enter_demand_answer_span<'b>(
+        &'b self,
+        from: impl Display,
+        target: impl Display,
+        key: impl Debug,
+    ) -> Option<DemandSpan<'b>> {
+        self.demand_collector
+            .as_ref()
+            .map(|c| c.enter(from, target, key))
     }
 
     /// Set the pysa reporter for inline extraction during type checking.
@@ -1338,6 +1422,11 @@ impl<'a> Transaction<'a> {
             };
             ns_counter.fetch_add(elapsed_ns, Ordering::Relaxed);
             count_counter.fetch_add(1, Ordering::Relaxed);
+
+            // Notify subscriber of step completion.
+            if let Some(subscriber) = &self.data.subscriber {
+                subscriber.step_computed(&module_data.handle, todo);
+            }
 
             let mut load_result = None;
             // Compute which exports changed for fine-grained invalidation.
@@ -2518,7 +2607,13 @@ impl<'a> TransactionHandle<'a> {
         f: impl FnOnce(&Exports, &Self) -> T,
         dep: ModuleDep,
     ) -> Option<T> {
+        let label = dep.demand_label();
         let module_data = self.get_module(module, None, dep).finding()?;
+        self.transaction.record_demand_exports_event(
+            self.module_data.handle.module(),
+            module,
+            label,
+        );
         let exports = self.transaction.lookup_export(module_data);
         let lookup = TransactionHandle {
             transaction: self.transaction,
@@ -2641,6 +2736,11 @@ impl<'a> LookupExport for TransactionHandle<'a> {
     fn module_exists(&self, module: ModuleName) -> FindingOrError<()> {
         self.get_module(module, None, ModuleDep::Exists)
             .map(|module_data| {
+                self.transaction.record_demand_exports_event(
+                    self.module_data.handle.module(),
+                    module,
+                    ModuleDep::Exists.demand_label(),
+                );
                 self.transaction.lookup_export(module_data);
             })
     }
@@ -2649,7 +2749,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
         self.with_exports(
             module,
             |exports, _lookup| exports.is_submodule_imported_implicitly(name),
-            ModuleDep::NameMetadata(name.clone()),
+            ModuleDep::IsSubmoduleImportedImplicitly(name.clone()),
         )
         .unwrap_or(false)
     }
@@ -2664,7 +2764,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                     .cloned()
                     .collect::<SmallSet<Name>>()
             },
-            ModuleDep::Exists,
+            ModuleDep::EveryExportUntracked,
         )
     }
 
@@ -2678,7 +2778,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                 }) => Some(d.clone()),
                 _ => None,
             },
-            ModuleDep::NameMetadata(name.clone()),
+            ModuleDep::GetDeprecated(name.clone()),
         )?
     }
 
@@ -2691,7 +2791,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                     Some(ExportLocation::OtherModule(..))
                 )
             },
-            ModuleDep::NameMetadata(name.clone()),
+            ModuleDep::IsReexport(name.clone()),
         )
         .unwrap_or(false)
     }
@@ -2719,7 +2819,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                         Some(Ok((*other_module, original_name.clone())))
                     }
                 },
-                ModuleDep::NameMetadata(name.clone()),
+                ModuleDep::IsSpecialExport(name.clone()),
             )??;
 
             match next {
@@ -2743,7 +2843,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                 }) => *docstring_range,
                 _ => None,
             },
-            ModuleDep::NameMetadata(name.clone()),
+            ModuleDep::DocstringRange(name.clone()),
         )?
     }
 
@@ -2765,7 +2865,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                     }
                     None => Err(false),
                 },
-                ModuleDep::NameMetadata(name.clone()),
+                ModuleDep::IsFinal(name.clone()),
             );
 
             match next {
@@ -2801,6 +2901,12 @@ impl<'a> LookupAnswer for TransactionHandle<'a> {
             .get_module(module, path, ModuleDep::Key(k.to_anykey()))
             .finding()
             .unwrap();
+        // Hold the span guard for the duration of the lookup so that a panic
+        // inside `lookup_answer` still closes the span (keeping the per-thread
+        // demand stack balanced on this worker for subsequent demands).
+        let _demand_span =
+            self.transaction
+                .enter_demand_answer_span(self.module_data.handle.module(), module, k);
         let res = self.transaction.lookup_answer(module_data, k, thread_state);
         if res.is_none() {
             let msg = format!(
@@ -3079,6 +3185,7 @@ impl State {
             }),
             sub_task_telemetry: None,
             timing: Default::default(),
+            demand_collector: None,
             data: TransactionData {
                 state: self,
                 stdlib,
@@ -3150,6 +3257,7 @@ impl State {
                     stats,
                     sub_task_telemetry: _,
                     timing,
+                    demand_collector: _,
                     data:
                         TransactionData {
                             stdlib,

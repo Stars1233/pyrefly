@@ -38,6 +38,8 @@ use pyrefly_python::module_name::ModuleNameWithKind;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::args::clap_env;
+use pyrefly_util::demand_tree::DemandCollector;
+use pyrefly_util::demand_tree::report_json;
 use pyrefly_util::display;
 use pyrefly_util::display::count;
 use pyrefly_util::display::number_thousands;
@@ -75,7 +77,9 @@ use crate::state::require::Require;
 use crate::state::require::RequireLevels;
 use crate::state::state::State;
 use crate::state::state::Transaction;
+use crate::state::steps::Step;
 use crate::state::subscriber::ProgressBarStyle;
+use crate::state::subscriber::TestSubscriber;
 
 /// Result data from a non-watch check run, used for telemetry logging.
 pub struct CheckResult {
@@ -262,6 +266,10 @@ struct OutputArgs {
     /// Format for pysa report output (json or capnp)
     #[arg(long, value_enum, default_value_t = report::pysa::PysaFormat::Capnp)]
     report_pysa_format: report::pysa::PysaFormat,
+    /// Report the cross-module demand tree (aggregated summary of LookupAnswer
+    /// and LookupExport calls). Useful for analyzing laziness properties.
+    #[arg(long, value_name = "OUTPUT_FILE")]
+    report_demand_tree: Option<PathBuf>,
     /// Generate a CinderX-format type report (experimental, internal-only).
     #[arg(long, value_name = "OUTPUT_DIR", hide = true)]
     report_cinderx: Option<PathBuf>,
@@ -966,7 +974,15 @@ impl CheckArgs {
         }
 
         let type_check_start = Instant::now();
-        transaction.set_subscriber(self.output.progress_bar_style().make_subscriber());
+        let demand_tree_subscriber = if self.output.report_demand_tree.is_some() {
+            transaction.set_demand_collector(Some(DemandCollector::new()));
+            let sub = TestSubscriber::new();
+            transaction.set_subscriber(Some(Box::new(sub.dupe())));
+            Some(sub)
+        } else {
+            transaction.set_subscriber(self.output.progress_bar_style().make_subscriber());
+            None
+        };
         transaction.run(handles, require, None);
         transaction.set_subscriber(None);
 
@@ -1211,6 +1227,20 @@ impl CheckArgs {
                 path,
                 report::dependency_graph::dependency_graph(transaction, handles),
             )?;
+        }
+        if let Some(path) = &self.output.report_demand_tree {
+            let roots = transaction.take_demand_roots();
+            let module_steps: Vec<(String, &'static str)> = demand_tree_subscriber
+                .expect("demand_tree_subscriber is set when report_demand_tree is Some")
+                .finish_detailed()
+                .into_iter()
+                .map(|(handle, info)| {
+                    let label = info.last_step.map_or("Nothing", Step::label);
+                    (handle.module().as_str().to_owned(), label)
+                })
+                .collect();
+            let output = report_json(&roots, &module_steps);
+            fs_anyhow::write(path, output)?;
         }
         if self.behavior.expectations {
             loads.check_against_expectations()?;
