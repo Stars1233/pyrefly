@@ -4188,9 +4188,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     }
 
     /// Final missing-attribute step of `solve_import`'s cascade. Emits
-    /// the diagnostic (suppressed in dead code) and returns an `Any`.
-    /// `Any(Error)` for the not-found case, `Any(Implicit)` for other
-    /// non-fatal lookup errors.
+    /// `MissingModuleAttribute` (suppressed in dead code) and returns
+    /// `Any(Error)`. The other failure mode — `m` itself can't be
+    /// found — is handled out-of-band by the per-statement
+    /// `Binding::Module` that `bind_module_exports` inserts; this
+    /// method stays silent in that case (returns `Any(Error)`) so we
+    /// don't double-emit.
     fn solve_import_missing(
         &self,
         name: &Name,
@@ -4199,6 +4202,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         submodule_error: FindError,
         errors: &ErrorCollector,
     ) -> Type {
+        if matches!(self.exports.module_exists(m), FindingOrError::Error(..)) {
+            // The per-statement `Binding::Module` reports the
+            // missing-module diagnostic; nothing to do here.
+            return self.heap.mk_any_error();
+        }
         if matches!(submodule_error, FindError::MissingImport(..)) {
             if !fallback.is_unreachable {
                 errors.add(
@@ -4210,6 +4218,26 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.heap.mk_any_error()
         } else {
             self.heap.mk_any_implicit()
+        }
+    }
+
+    /// Emit any `FindError` associated with `m` at `range`. Called from
+    /// the `Binding::Module` solver so the missing-module diagnostic
+    /// only fires for bindings that are actually solved — unused
+    /// `import X` in a transitive dep stays at `Step::Nothing`. The
+    /// `module_exists` call still demands `Step::Load` so incremental
+    /// re-check picks up edits to `m`.
+    fn report_module_find_error(&self, m: ModuleName, range: TextRange, errors: &ErrorCollector) {
+        let result = self.exports.module_exists(m);
+        let error = match &result {
+            FindingOrError::Finding(f) => f.error.as_ref(),
+            FindingOrError::Error(e) => Some(e),
+        };
+        if let Some(error) = error
+            && let Some(kind) = error.kind()
+        {
+            let (ctx, msg) = error.display();
+            errors.add(range, ErrorInfo::new(kind, ctx.as_deref()), msg);
         }
     }
 
@@ -5128,7 +5156,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             Binding::TypeParameter(tp) => {
                 self.quantified_from_type_parameter(tp, errors).to_value()
             }
-            Binding::Module(x) => self.binding_to_type_module(x.0, &x.1, x.2),
+            Binding::Module(x) => {
+                if let Some(error_range) = x.3 {
+                    self.report_module_find_error(x.0, error_range, errors);
+                }
+                self.binding_to_type_module(x.0, &x.1, x.2)
+            }
             Binding::TypeAlias(x) => self.wrap_type_alias(
                 &x.name,
                 (*self.get_idx(x.key_type_alias)).clone(),

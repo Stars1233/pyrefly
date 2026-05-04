@@ -8,9 +8,9 @@ Deprecation warning emission for imported names happens at solve time
 The warning fires only if the import is actually resolved — which
 `old_func` is not here, because `a` never references it.
 
-`c` reaches only `Step::Load`: the binder reads its file contents to
-resolve the import target, but never forces its export set to be
-materialized.
+`c` ends at `Step::Nothing`: `b`'s bind phase no longer forces `c`
+via `module_exists`, the import binding for `old_func` is never
+solved (nobody consumes it), and `c`'s file is never touched.
 
 ## Files
 
@@ -36,12 +36,11 @@ def old_func() -> None: ...
 ```expected
 a: Solutions
 b: Answers
-c: Load
+c: Nothing
 
 (159 builtin demands hidden)
 a -> b::Load(module_exists)
 a -> b::Exports(export_exists)
 a -> b::Exports(get_deprecated)
 a -> b::KeyExport(Name("value"))
-  b -> c::Load(module_exists)
 ```

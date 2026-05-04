@@ -19,8 +19,8 @@ These numbers are from a single sampled run, not a continuous benchmark. Re-run 
 
 Aggregated over 25 hot files from one large codebase. Answer-side
 demands account for the majority of cross-module work; most touched
-dependency modules stop at `Step::Load` without their export sets
-being materialized.
+dependency modules end at `Step::Exports` because `is_special_export`
+forced their export sets during binding.
 
 1. **MRO walk without early exit** (~64% of all demands across class
    keys) — `KeyClassSynthesizedFields` is ~24% of all demands (~36% of
@@ -29,32 +29,26 @@ being materialized.
    files with deep class hierarchies. (See "MRO computed even when
    attribute is on the class itself" and "Multiple inheritance check
    resolves unique parent fields" below.)
-2. **`is_special_export` during binding** (~21% of all demands; ~64%
-   of `Exports` demands; per-file range 2-48%, median ~28%) — the
-   dominant `LookupExport` reason. Fires for type-var classification
-   (`T = TypeVar(...)`, `P = ParamSpec(...)`, etc.) and other
-   special-form recognition during binding.
-3. **`module_exists` during binding** (~9% of all demands; ~26% of
-   `Exports` demands) — `import x.y` and the self-import submodule
-   fallback demand the target module's existence at bind time. The
-   bind phase needs to construct a `Binding::Module` only when the
-   submodule is reachable, so it has to know up front whether the
-   submodule resolves.
-4. **Full function signature on import** — resolves 11 keys per imported
+2. **`is_special_export` during binding** (~23% of all demands; ~87%
+   of `Exports` demands) — the dominant `LookupExport` reason by a wide
+   margin. Fires for type-var classification (`T = TypeVar(...)`,
+   `P = ParamSpec(...)`, etc.) and other special-form recognition
+   during binding.
+3. **Full function signature on import** — resolves 11 keys per imported
    function regardless of usage.
-5. **Class metadata for annotation-only usage** — `is_typed_dict()` check
+4. **Class metadata for annotation-only usage** — `is_typed_dict()` check
    on every class-as-annotation.
-6. **Eagerly resolved builtins** — 150 KeyExport + cascading demands per
+5. **Eagerly resolved builtins** — 150 KeyExport + cascading demands per
    module. Fixed cost but adds up.
-7. **Multiple inheritance check resolves unique fields** — low volume but
+6. **Multiple inheritance check resolves unique fields** — low volume but
    real waste for wide hierarchies.
 
-Of the ~199k dependency modules touched across the 25 sampled files,
-~18% are forced to `Step::Exports` only; ~76% stop at `Step::Load`,
-~5% reach `Step::Answers`, and ~0% reach `Step::Solutions`. ~88% of
-the `Step::Exports` modules have `is_special_export` among their
-reasons, but only ~2% have it as their only reason — `module_exists`
-and `is_final` calls almost always co-occur on the same target.
+Of the ~46k dependency modules touched across the 25 sampled files,
+~77% are forced to `Step::Exports` only; <0.1% stop at `Step::Load`,
+~23% reach `Step::Answers`, and ~0% reach `Step::Solutions`. The few
+remaining `Step::Load` modules are submodules touched by
+`solve_import`'s submodule-fallback or `attr.rs`'s module-attribute
+cascade — both are inherently solve-time.
 
 ## Eagerly resolved builtins
 
@@ -128,25 +122,25 @@ during `Bindings::new`, meaning that when module B is being bound, ALL
 of B's imports have their exports eagerly computed — even if the caller
 (module A) never uses anything from those transitive dependencies.
 
-**Visible in:** 6 tests all show `c: Exports` with no demand tree
-entries pointing to C:
-- `test_bare_import_forces_exports` — `import c` triggers `module_exists(c)`
+**Visible in:** 5 tests show `c: Exports` with no demand tree entries
+pointing to C:
 - `test_import_star_forces_exports` — `from c import *` triggers `get_wildcard(c)`
 - `test_export_exists_forces_exports` — `from c import Foo` triggers `export_exists(c, "Foo")`
 - `test_deprecated_forces_exports` — `from c import old_func` triggers `get_deprecated(c, "old_func")`
 - `test_is_final_forces_exports` — `X = 2` (reassigning import) triggers `is_final(c, "X")`
 - `test_special_export_forces_exports` — `T = MyTypeVar("T")` triggers `is_special_export(c, "MyTypeVar")`
 
-Also visible in `test_unused_import_from_same_module` and
-`test_transitive_import_annotated` where `c: Exports` appears.
+`test_bare_import_forces_exports` shows `c: Nothing` — the bare
+`import c` no longer demands `c` at bind time, and nothing else
+forces it. Also visible in `test_unused_import_from_same_module` and
+`test_transitive_import_annotated` where `c: Exports` appears (other
+LookupExport calls fire on `c` even though no name from `c` is used).
 
-**Real-world impact:** `Exports(is_special_export)` accounts for ~21%
-of all cross-module demands (per-file range 2-48%, median ~28%) and
-~64% of `Exports` demands — the dominant `LookupExport` reason.
-~18% of dependency modules end at `Step::Exports` only; the
-remaining majority stop at `Step::Load` (file contents read, export
-set not materialized). See the Methodology section above for how this
-is computed.
+**Real-world impact:** `Exports(is_special_export)` accounts for ~23%
+of all cross-module demands and ~87% of `Exports` demands — by far
+the dominant remaining `LookupExport` reason. ~77% of dependency
+modules end at `Step::Exports` only; almost none stop at `Step::Load`
+(see Methodology above).
 
 **Ideal behavior:** Module C should not be computed at all (`c: Nothing`)
 when A doesn't need it. B's bindings should be constructible without
@@ -165,9 +159,6 @@ exports during binding.
   which `Binding` variant is created. Could use syntactic name
   matching for the common case with solve-time validation for
   re-exports.
-- `module_exists` for `import x.y` and the self-import submodule
-  fallback — bind phase needs to know whether to emit `Binding::Module`
-  vs. an error binding.
 - `is_final` reassignment check — fires when a name imported from
   another module is reassigned, to confirm the imported name is not
   `Final`.
@@ -176,7 +167,7 @@ exports during binding.
 - `module_exists` for builtins — unavoidable; fixed per-module cost.
 
 **Where calls already fire only at solve time** (so they don't force
-exports during binding):
+exports or load during binding):
 
 - `export_exists` for cross-module `from X import Y` — `Binding::Import`
   carries an `ImportFallback`; solver does the
@@ -186,6 +177,11 @@ exports during binding):
 - `is_special_export` for `typing.Self` — solve-time `untype_opt`
   recognizes `Type::Type[SpecialForm(SelfType)]`; the bind side records
   one `class_scopes` entry per class instead of one per use.
+- `module_exists` for `import X` and `from X import …` — `Binding::Module`
+  carries an optional error range; the solver runs the
+  missing-module check (still demanding `Step::Load` so incremental
+  re-check picks up edits) only for bindings that are actually solved,
+  letting unused imports in transitive deps stay at `Step::Nothing`.
 
 ## Note on repeated demands to the same key
 

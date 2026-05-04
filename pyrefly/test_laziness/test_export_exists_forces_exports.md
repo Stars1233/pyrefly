@@ -8,8 +8,8 @@ existence is verified only at solve time, when the binding's value is
 demanded. Since `a` never references `Foo`, the demand never fires and
 `c`'s export set is never forced.
 
-`c` reaches only `Step::Load` — the binder reads its file contents to
-resolve the import target, but doesn't materialize its export set.
+`c` ends at `Step::Nothing` — `b`'s bind phase no longer forces `c`
+via `module_exists`, and nothing else demands it.
 
 This is the same pattern as `test_unused_import_from_same_module` but
 simplified: `b` imports from `c` but only exports an unrelated value.
@@ -39,12 +39,11 @@ class Foo:
 ```expected
 a: Solutions
 b: Answers
-c: Load
+c: Nothing
 
 (159 builtin demands hidden)
 a -> b::Load(module_exists)
 a -> b::Exports(export_exists)
 a -> b::Exports(get_deprecated)
 a -> b::KeyExport(Name("value"))
-  b -> c::Load(module_exists)
 ```

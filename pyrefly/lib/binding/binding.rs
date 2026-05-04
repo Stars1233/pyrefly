@@ -2076,8 +2076,11 @@ pub struct ImportBinding {
 /// [`ImportBinding::fallback`].
 #[derive(Clone, Debug)]
 pub struct ImportFallback {
-    /// Range to report a `MissingModuleAttribute` error at, if the name
-    /// cannot be resolved by any fallback path.
+    /// Per-name range (the `Alias` range, e.g. just `Y` or `Y as Z`).
+    /// Used to anchor a `MissingModuleAttribute` error if the imported
+    /// name can't be resolved inside an existing module. The
+    /// missing-module error itself is handled by a separate
+    /// per-statement `Binding::Module`.
     pub stmt_range: TextRange,
     /// If true, the import site is dead code (statically unreachable).
     /// Suppress the missing-attribute error in that case — the bind-time
@@ -2175,9 +2178,16 @@ pub enum Binding {
     /// A narrowed type.
     Narrow(Idx<Key>, Box<NarrowOp>, NarrowUseLocation),
     /// An import of a module.
-    /// Also contains the path along the module to bind, and optionally a key
-    /// with the previous import to this binding (in which case merge the modules).
-    Module(Box<(ModuleName, Box<[Name]>, Option<Idx<Key>>)>),
+    /// Also contains the path along the module to bind, optionally a key
+    /// with the previous import to this binding (in which case merge the
+    /// modules), and optionally a `TextRange` at which to emit a
+    /// missing-module diagnostic if `module_exists` returns a `FindError`
+    /// at solve time. The range is `Some` for top-level `import X`
+    /// statements and `None` when the binding is constructed
+    /// internally — for example by `solve_import`'s submodule fallback,
+    /// where the cascade is responsible for any missing-module
+    /// diagnostic.
+    Module(Box<(ModuleName, Box<[Name]>, Option<Idx<Key>>, Option<TextRange>)>),
     /// A name that might be a legacy type parameter. Solving this gives the Quantified type if so.
     /// The TextRange is optional and controls whether to produce an error
     /// saying there are scoped type parameters for this function / class, and
@@ -2352,7 +2362,7 @@ impl DisplayWith<Bindings> for Binding {
                 )
             }
             Self::Module(x) => {
-                let (m, path, key) = x.as_ref();
+                let (m, path, key, _) = x.as_ref();
                 write!(
                     f,
                     "Module({m}, {}, {})",

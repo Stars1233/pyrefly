@@ -62,8 +62,6 @@ use crate::config::error_kind::ErrorKind;
 use crate::error::context::ErrorInfo;
 use crate::export::definitions::MutableCaptureKind;
 use crate::export::special::SpecialExport;
-use crate::state::loader::FindError;
-use crate::state::loader::FindingOrError;
 use crate::types::alias::resolve_typeshed_alias;
 use crate::types::special_form::SpecialForm;
 use crate::types::types::AnyStyle;
@@ -496,14 +494,6 @@ impl<'a> BindingsBuilder<'a> {
             );
         }
         self.scopes.mark_flow_termination(false);
-    }
-
-    fn find_error(&self, error: &FindError, range: TextRange) {
-        let Some(kind) = error.kind() else {
-            return;
-        };
-        let (ctx, msg) = error.display();
-        self.error_multiline(range, ErrorInfo::new(kind, ctx.as_deref()), msg);
     }
 
     /// Evaluate the statements and update the bindings.
@@ -1243,9 +1233,6 @@ impl<'a> BindingsBuilder<'a> {
             Stmt::Import(x) => {
                 for x in x.names {
                     let m = ModuleName::from_name(&x.name.id);
-                    if let Some(error) = self.lookup.module_exists(m).error() {
-                        self.find_error(&error, x.range);
-                    }
                     match x.asname {
                         Some(asname) => {
                             // `import X as X` is an explicit re-export per Python typing spec.
@@ -1261,6 +1248,7 @@ impl<'a> BindingsBuilder<'a> {
                                     m,
                                     m.components().into_boxed_slice(),
                                     None,
+                                    Some(x.range),
                                 ))),
                                 FlowStyle::ImportAs(m),
                             );
@@ -1274,6 +1262,7 @@ impl<'a> BindingsBuilder<'a> {
                                     m,
                                     Box::new([first.clone()]),
                                     module_key,
+                                    Some(x.range),
                                 ))),
                             );
                             // Register the import using the first component (e.g., "os" from "os.path")
@@ -1294,18 +1283,7 @@ impl<'a> BindingsBuilder<'a> {
                     x.level,
                     x.module.as_ref().map(|x| &x.id),
                 ) {
-                    match self.lookup.module_exists(m) {
-                        FindingOrError::Finding(f) => {
-                            if let Some(error) = f.error {
-                                self.find_error(&error, x.range);
-                            }
-                            self.bind_module_exports(x, m);
-                        }
-                        FindingOrError::Error(error) => {
-                            self.find_error(&error, x.range);
-                            self.bind_unimportable_names(&x, error.kind().is_some());
-                        }
-                    }
+                    self.bind_module_exports(x, m);
                 } else {
                     self.error(
                         x.range,
@@ -1412,6 +1390,24 @@ impl<'a> BindingsBuilder<'a> {
     }
 
     fn bind_module_exports(&mut self, x: StmtImportFrom, m: ModuleName) {
+        let module_range = x.range;
+        // Single solve-time module-existence check per `from X import …`
+        // statement. Surfaces a `MissingImport` (or other find-error)
+        // diagnostic for `X` without firing bind-time `module_exists`,
+        // and covers all shapes uniformly: named imports, wildcards
+        // (where the bind-time `get_wildcard` may have silently returned
+        // `None` because `X` doesn't exist), and parse-failed forms with
+        // no names. Nothing consumes the resulting module type — the
+        // binding exists only so its solver emits the diagnostic.
+        self.insert_binding(
+            Key::Import(Box::new((m.first_component(), module_range))),
+            Binding::Module(Box::new((
+                m,
+                m.components().into_boxed_slice(),
+                None,
+                Some(module_range),
+            ))),
+        );
         for x in x.names {
             if &x.name == "*" {
                 let Some(wildcards) = self.lookup.get_wildcard(m) else {
