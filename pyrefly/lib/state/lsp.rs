@@ -1264,7 +1264,25 @@ impl<'a> Transaction<'a> {
                     }
                     m = *module;
                 }
-                None => return None,
+                None => {
+                    // The name isn't an export of `m`. If `m` exposes a
+                    // module-level `__getattr__`, `from m import name`
+                    // succeeds at runtime through the dunder's return
+                    // value — point go-to-def at wherever `__getattr__`
+                    // ultimately lives. Recurse so the loop's re-export
+                    // chasing applies to `__getattr__` too. The guard
+                    // prevents infinite recursion when `__getattr__`
+                    // itself isn't found.
+                    if name == *dunder::GETATTR {
+                        return None;
+                    }
+                    return self.resolve_named_import(
+                        &handle,
+                        m,
+                        dunder::GETATTR.clone(),
+                        preference,
+                    );
+                }
             }
         }
         None

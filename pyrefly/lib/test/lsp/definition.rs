@@ -982,12 +982,10 @@ Definition Result:
 #[test]
 fn import_via_reexported_module_getattr_indirect_test() {
     // `from m import name` where `m` re-exports `name` from another
-    // module that itself only resolves `name` via `__getattr__`.
-    // Ideally, go-to-definition would follow the re-export chase and
-    // then fall back to `__getattr__` in `inner`. Today it returns
-    // `None`: the chase from `provider` to `inner` does not retry
-    // with the `__getattr__` fallback when the name is missing in
-    // the chased target.
+    // module that itself only resolves `name` via `__getattr__`. The
+    // chase walks `provider` -> `inner`, finds `name` missing there,
+    // and the `__getattr__` fallback in `resolve_named_import` lands
+    // at `__getattr__` in `inner`.
     let code_inner: &str = r#"
 def __getattr__(name: str) -> int: ...
 "#;
@@ -1011,7 +1009,9 @@ from .provider import foo
 # main.py
 2 | from .provider import foo
                           ^
-Definition Result: None
+Definition Result:
+2 | def __getattr__(name: str) -> int: ...
+        ^^^^^^^^^^^
 
 
 # provider.py

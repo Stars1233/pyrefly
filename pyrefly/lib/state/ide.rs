@@ -144,12 +144,17 @@ fn create_intermediate_definition_from(
                 ));
             }
             Binding::ImportViaGetattr(x) => {
-                // For __getattr__ imports, the name doesn't exist directly in the module,
-                // so we point to __getattr__ instead.
+                // Treated identically to `Binding::Import`: emit a
+                // `NamedImport` with the original imported name. The
+                // `__getattr__` jump happens inside
+                // `resolve_named_import`, which falls back to the
+                // module's `__getattr__` after the export lookup misses
+                // — exactly the situation that produced this binding at
+                // bind time.
                 return Some(IntermediateDefinition::NamedImport(
                     def_key.range(),
                     x.0,
-                    pyrefly_python::dunder::GETATTR.clone(),
+                    x.1.clone(),
                     None,
                 ));
             }
