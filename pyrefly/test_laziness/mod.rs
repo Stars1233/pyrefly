@@ -246,6 +246,9 @@ fn run_test(test: &LazinessTest) -> String {
 fn render_node_line(node: &DemandEdge, depth: usize) -> String {
     let indent = "  ".repeat(depth);
     match &node.kind {
+        DemandKind::Load { reason } => {
+            format!("{indent}{} -> {}::Load({reason})", node.from, node.target)
+        }
         DemandKind::Exports { reason } => {
             format!(
                 "{indent}{} -> {}::Exports({reason})",

@@ -729,6 +729,19 @@ impl<'a> Transaction<'a> {
             .unwrap_or_default()
     }
 
+    /// Record a leaf `Load`-event in the demand tree, if a collector
+    /// is installed. No-op otherwise.
+    fn record_demand_load_event(
+        &self,
+        from: impl Display,
+        target: impl Display,
+        label: &'static str,
+    ) {
+        if let Some(c) = self.demand_collector.as_ref() {
+            c.load_event(from, target, label);
+        }
+    }
+
     /// Record a leaf `Exports`-event in the demand tree, if a collector
     /// is installed. No-op otherwise. Callers obtain the label via
     /// [`ModuleDep::demand_label`] before moving the dep into
@@ -2734,14 +2747,18 @@ impl<'a> LookupExport for TransactionHandle<'a> {
     }
 
     fn module_exists(&self, module: ModuleName) -> FindingOrError<()> {
+        // An existence bit would be enough in theory, but in practice
+        // the incremental change-detection path only kicks in for
+        // modules that have a stored Load result, so we demand Load
+        // here to keep file edits to the target observable.
         self.get_module(module, None, ModuleDep::Exists)
             .map(|module_data| {
-                self.transaction.record_demand_exports_event(
+                self.transaction.record_demand_load_event(
                     self.module_data.handle.module(),
                     module,
                     ModuleDep::Exists.demand_label(),
                 );
-                self.transaction.lookup_export(module_data);
+                self.transaction.demand(module_data, Step::Load);
             })
     }
 

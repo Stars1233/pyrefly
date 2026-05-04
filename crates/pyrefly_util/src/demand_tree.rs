@@ -34,8 +34,13 @@ use crate::lock::Mutex;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DemandKind {
-    /// One Exports-level demand call (e.g. `module_exists`,
-    /// `export_exists`). `reason` identifies which `LookupExport`
+    /// One Load-level demand call. `reason` identifies which
+    /// `LookupExport` method triggered it. Load-level demands only
+    /// confirm the target module is reachable; they do not force its
+    /// exports to be computed.
+    Load { reason: String },
+    /// One Exports-level demand call (e.g. `export_exists`,
+    /// `is_special_export`). `reason` identifies which `LookupExport`
     /// method triggered it. Each call records its own edge — multiple
     /// reasons against the same `(from, target)` pair produce
     /// multiple sibling edges, one per call.
@@ -110,6 +115,20 @@ impl DemandCollector {
             collector: self,
             _not_send: PhantomData,
         }
+    }
+
+    /// Record a leaf event for a Load-level demand. `reason` identifies
+    /// which `LookupExport` method triggered the demand.
+    #[inline]
+    pub fn load_event(&self, from: impl fmt::Display, target: impl fmt::Display, reason: &str) {
+        self.attach(DemandEdge {
+            from: from.to_string(),
+            target: target.to_string(),
+            kind: DemandKind::Load {
+                reason: reason.to_owned(),
+            },
+            children: Vec::new(),
+        });
     }
 
     /// Record a leaf event for an Exports-level demand. `reason` identifies
