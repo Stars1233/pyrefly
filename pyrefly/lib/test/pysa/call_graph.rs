@@ -4784,7 +4784,6 @@ call_graph_testcase!(
     test_nested_function,
     TEST_MODULE_NAME,
     r#"
-
 def baz(x: int) -> int:
   return x
 def foo():
@@ -4795,7 +4794,7 @@ def foo():
         vec![(
             "test.bar",
             vec![(
-                "7:12-7:18",
+                "6:12-6:18",
                 regular_call_callees(vec![
                     create_call_target("test.baz", TargetType::Function)
                         .with_return_type(ScalarTypeProperties::int()),

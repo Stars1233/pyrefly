@@ -650,7 +650,6 @@ def test():
     # it works out to None, sometimes Unknown.
     # Plenty of errors here.
     reveal_type(i.x) # E:
-
 "#,
 );
 

@@ -1215,7 +1215,6 @@ class Namespace:
             return "test"
         return Op()
 x = Namespace().some_op.default # E:  Object of class `str` has no attribute `default
-
 "#,
 );
 

@@ -142,7 +142,6 @@ from typing import assert_type, Literal
 t = ("a", "b")
 assert_type(t[False], Literal["a"])
 assert_type(t[True], Literal["b"])
-
 "#,
 );
 

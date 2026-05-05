@@ -92,7 +92,6 @@ class Model(BaseModel):
 
 m = Model()
 m.x = 10
-
 "#,
 );
 
@@ -186,7 +185,6 @@ class Sub3(Base3):
     a: int
     
 Sub3(a=1, y=2) 
-
 "#,
 );
 

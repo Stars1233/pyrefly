@@ -46,7 +46,6 @@ testcase!(
     bug = "T2 and T3 should be resolved when we traverse methods. They will be bivariant until then. For T1, we raise an error because we already know it's invariant in list.",
     test_general_variance,
     r#"
-
 class ClassA[T1, T2, T3](list[T1]):
     def method1(self, a: T2) -> None:
         ...
@@ -124,7 +123,6 @@ class ShouldBeCovariant3[U]:
 
 vco3_1: ShouldBeCovariant3[float] = ShouldBeCovariant3[int]()  # OK
 vco3_2: ShouldBeCovariant3[int] = ShouldBeCovariant3[float]()  # E:
-
 "#,
 );
 
@@ -136,7 +134,6 @@ class ShouldBeInvariant5[T]:
         self.x = x
 
 vinv5_1: ShouldBeInvariant5[float] = ShouldBeInvariant5[int](1)  # E:
-
 "#,
 );
 
@@ -159,7 +156,6 @@ class ShouldBeContravariant2[T]:
 
 vcontra1_1: ShouldBeContravariant2[float] = ShouldBeContravariant2[int](1)  # E:
 vcontra1_2: ShouldBeContravariant2[int] = ShouldBeContravariant2[float](1.2)  # OK
-
 "#,
 );
 
@@ -202,7 +198,6 @@ class ShouldBeInvariant6(Generic[K]):
 
 vo6_1: ShouldBeInvariant6[float] = ShouldBeInvariant6[int](1)  # E:
 vo6_2: ShouldBeInvariant6[int] = ShouldBeInvariant6[float](1.0)  # E:
-
 "#,
 );
 
@@ -218,7 +213,6 @@ class ShouldBeCovariant5[K]:
 
 vo5_1: ShouldBeCovariant5[float] = ShouldBeCovariant5[int](1)  # OK
 vo5_2: ShouldBeCovariant5[int] = ShouldBeCovariant5[float](1.0)  # E:
-
 "#,
 );
 

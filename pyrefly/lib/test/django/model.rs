@@ -43,7 +43,6 @@ class PersonFieldsetTupleAdmin(admin.ModelAdmin[Person]):
             },
         ),
     )
-
 "#,
 );
 
@@ -68,7 +67,6 @@ class PersonFieldsetListAdmin(admin.ModelAdmin[Person]):
             },
         )
     ]
-
 "#,
 );
 

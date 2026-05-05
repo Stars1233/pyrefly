@@ -26,7 +26,6 @@ class ChildB(ParentB):
 testcase!(
     test_override_basic_method,
     r#"
-
 class A:
     def f(self, x:str, y:str) -> str:
         return x + y
@@ -525,7 +524,6 @@ class ChildA(ParentA):
 testcase!(
     test_overload_override_error,
     r#"
-
 from typing import overload, override
 
 class ParentA:
