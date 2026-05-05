@@ -1567,19 +1567,6 @@ impl Scopes {
         self.current().class_and_metadata_keys()
     }
 
-    /// Are we anywhere inside a class? If so, return the keys for the class and its metadata.
-    /// This function looks at enclosing scopes, unlike `current_class_and_metadata_keys`.
-    pub fn enclosing_class_and_metadata_keys(
-        &self,
-    ) -> Option<(Idx<KeyClass>, Idx<KeyClassMetadata>)> {
-        for scope in self.iter_rev() {
-            if let Some(class_and_metadata) = scope.class_and_metadata_keys() {
-                return Some(class_and_metadata);
-            }
-        }
-        None
-    }
-
     /// Are we anywhere inside a class? If so, return the class object idx.
     /// This function looks at enclosing scopes.
     pub fn enclosing_class_object_idx(&self) -> Option<Idx<Key>> {
