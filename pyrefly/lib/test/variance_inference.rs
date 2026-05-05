@@ -115,7 +115,6 @@ testcase!(
     r#"
 from typing import Sequence
 
-
 class ShouldBeCovariant2[T](Sequence[T]):
     pass
 
@@ -151,7 +150,6 @@ class ShouldBeCovariant1[T]:
 vco1_1: ShouldBeCovariant1[float] = ShouldBeCovariant1[int]()  # OK
 vco1_2: ShouldBeCovariant1[int] = ShouldBeCovariant1[float]()  # E:
 
-
 class ShouldBeContravariant2[T]:
     def __init__(self, value: T) -> None:
         pass
@@ -159,10 +157,8 @@ class ShouldBeContravariant2[T]:
     def set_value(self, value: T):
         pass
 
-
 vcontra1_1: ShouldBeContravariant2[float] = ShouldBeContravariant2[int](1)  # E:
 vcontra1_2: ShouldBeContravariant2[int] = ShouldBeContravariant2[float](1.2)  # OK
-
 
 "#,
 );
@@ -174,7 +170,6 @@ from typing import Generic, TypeVar, Iterator
 
 T = TypeVar("T", infer_variance=True)
 
-
 class ShouldBeCovariant1(Generic[T]):
     def __getitem__(self, index: int) -> T:
         ...
@@ -182,14 +177,10 @@ class ShouldBeCovariant1(Generic[T]):
     def __iter__(self) -> Iterator[T]:
         ...
 
-
 vco1_1: ShouldBeCovariant1[float] = ShouldBeCovariant1[int]()  # OK
 vco1_2: ShouldBeCovariant1[int] = ShouldBeCovariant1[float]()  # E:
 
-
-
 K = TypeVar("K", infer_variance=True)
-
 
 class ShouldBeCovariant5(Generic[K]):
     def __init__(self, x: K) -> None:
@@ -209,7 +200,6 @@ class ShouldBeInvariant6(Generic[K]):
     def x(self) -> K:
         return self.__x__
 
-
 vo6_1: ShouldBeInvariant6[float] = ShouldBeInvariant6[int](1)  # E:
 vo6_2: ShouldBeInvariant6[int] = ShouldBeInvariant6[float](1.0)  # E:
 
@@ -226,7 +216,6 @@ class ShouldBeCovariant5[K]:
     def x(self) -> K:
         return self._x
 
-
 vo5_1: ShouldBeCovariant5[float] = ShouldBeCovariant5[int](1)  # OK
 vo5_2: ShouldBeCovariant5[int] = ShouldBeCovariant5[float](1.0)  # E:
 
@@ -241,7 +230,6 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class ShouldBeCovariant4[T]:
     x: T
-
 
 vo4_1: ShouldBeCovariant4[float] = ShouldBeCovariant4[int](1)  # OK
 vo4_4: ShouldBeCovariant4[int] = ShouldBeCovariant4[float](1.0)  # E:

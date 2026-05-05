@@ -368,7 +368,6 @@ testcase!(
     r#"
 from typing import assert_type, LiteralString, reveal_type
 
-
 def f(x1: list[str], x2: list[LiteralString]):
     x3 = []
     assert_type(", ".join(x1), str)

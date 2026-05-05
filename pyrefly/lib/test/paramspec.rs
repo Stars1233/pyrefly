@@ -70,7 +70,6 @@ class CORSMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         pass
 
-
 def use_middleware() -> None:
     app = FastAPI()
     app.add_middleware(

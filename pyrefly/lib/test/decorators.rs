@@ -278,7 +278,6 @@ class decorator:
     ) -> Callable[TParams, TReturn]:
         ...
 
-
 class C:
     @decorator(42)
     def f(self, x: int) -> int:

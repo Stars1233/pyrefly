@@ -236,7 +236,6 @@ from typing import AsyncGenerator, assert_type
 class Yield: pass
 class Send: pass
 
-
 async def my_generator() -> AsyncGenerator[Yield, Send]:
     s = yield Yield()
 
@@ -252,7 +251,6 @@ from typing import AsyncGenerator, assert_type
 
 class Yield: pass
 class Send: pass
-
 
 def my_generator() -> AsyncGenerator[Yield, Send]: # E: Generator function should return `Generator`
     s = yield Yield()

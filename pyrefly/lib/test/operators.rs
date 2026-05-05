@@ -834,7 +834,6 @@ class ThisClassWorks:
             return ThisClassWorks(self.flag and other)
         return ThisClassWorks(self.flag and other.flag)
 
-
 def _produce_and_func() -> Callable[
     ["ThisClassDoesNotWork", Union["ThisClassDoesNotWork", bool]],
     "ThisClassDoesNotWork",
@@ -847,7 +846,6 @@ def _produce_and_func() -> Callable[
         return ThisClassDoesNotWork(self.flag and other.flag)
 
     return and_func
-
 
 class ThisClassDoesNotWork:
     def __init__(self, flag: bool) -> None:

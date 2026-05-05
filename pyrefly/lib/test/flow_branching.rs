@@ -2285,7 +2285,6 @@ import types
 from dataclasses import dataclass
 from typing import Any, TypeIs, assert_never
 
-
 def is_instance_union_aware[T](
     value: Any, target_type: type[T] | tuple[type[T], ...]
 ) -> TypeIs[T]: ...

@@ -381,7 +381,6 @@ from __future__ import annotations
 
 from typing import Callable
 
-
 class CachedMethod:
     def __init__(self, fn: Callable[[Constraint], int]) -> None:
         self._fn = fn
@@ -394,10 +393,8 @@ class CachedMethod:
 
     def clear_cache(self, obj: Constraint) -> None: ...
 
-
 def cache_on_self(fn: Callable[[Constraint], int]) -> CachedMethod:
     return CachedMethod(fn)
-
 
 class Constraint:
     @cache_on_self
